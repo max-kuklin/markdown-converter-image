@@ -1,0 +1,14 @@
+services:
+  converter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: converter
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
