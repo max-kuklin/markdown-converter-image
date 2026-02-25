@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import logging
 import os
 import re
@@ -42,11 +43,7 @@ def sanitize_filename(filename: str) -> str:
 @app.get("/health")
 async def health():
     pandoc_ok = shutil.which("pandoc") is not None
-    try:
-        from markitdown import MarkItDown  # noqa: F811
-        markitdown_ok = True
-    except ImportError:
-        markitdown_ok = False
+    markitdown_ok = importlib.util.find_spec("markitdown") is not None
 
     return {"status": "ok", "pandoc": pandoc_ok, "markitdown": markitdown_ok}
 
