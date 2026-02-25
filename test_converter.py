@@ -318,3 +318,80 @@ class TestPasswordProtectedDetection:
             data={"filename": "normal.xls"},
         )
         assert response.status_code != 415
+
+
+# ── .doc format detection and fallback tests ─────────────────────────────────
+
+class TestDocConversion:
+    RTF_CONTENT = b'{\\rtf1 Hello World}'
+    OLE2_HEADER = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1' + b'\x00' * 100
+
+    @patch("converter.pandoc_to_markdown")
+    def test_rtf_doc_routes_to_pandoc(self, mock_pandoc):
+        """A .doc file that is actually RTF should go straight to Pandoc."""
+        mock_pandoc.return_value = "# Hello World"
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.RTF_CONTENT)
+            tmp.close()
+            result = _convert_doc(tmp.name)
+            assert "Hello World" in result
+            mock_pandoc.assert_called_once()
+        finally:
+            os.unlink(tmp.name)
+
+    @patch("converter.pandoc_to_markdown")
+    @patch("converter.markitdown_to_markdown")
+    def test_ole2_doc_tries_markitdown_first(self, mock_markitdown, mock_pandoc):
+        """An OLE2 .doc should try MarkItDown first."""
+        mock_markitdown.return_value = "# Converted via MarkItDown"
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.OLE2_HEADER)
+            tmp.close()
+            result = _convert_doc(tmp.name)
+            assert "MarkItDown" in result
+            mock_markitdown.assert_called_once()
+            mock_pandoc.assert_not_called()
+        finally:
+            os.unlink(tmp.name)
+
+    @patch("converter.pandoc_to_markdown")
+    @patch("converter.markitdown_to_markdown")
+    def test_ole2_doc_falls_back_to_pandoc(self, mock_markitdown, mock_pandoc):
+        """When MarkItDown fails for OLE2 .doc, should fall back to Pandoc."""
+        mock_markitdown.side_effect = RuntimeError("MarkItDown failed")
+        mock_pandoc.return_value = "# Converted via Pandoc"
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.OLE2_HEADER)
+            tmp.close()
+            result = _convert_doc(tmp.name)
+            assert "Pandoc" in result
+            mock_markitdown.assert_called_once()
+            mock_pandoc.assert_called_once()
+        finally:
+            os.unlink(tmp.name)
+
+    @patch("converter.pandoc_to_markdown")
+    @patch("converter.markitdown_to_markdown")
+    def test_ole2_doc_both_fail_gives_clear_error(self, mock_markitdown, mock_pandoc):
+        """When both converters fail for .doc, error should suggest re-saving as .docx."""
+        mock_markitdown.side_effect = RuntimeError("MarkItDown failed")
+        mock_pandoc.side_effect = RuntimeError("Pandoc failed")
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.OLE2_HEADER)
+            tmp.close()
+            with pytest.raises(RuntimeError, match="re-saving as .docx"):
+                _convert_doc(tmp.name)
+        finally:
+            os.unlink(tmp.name)

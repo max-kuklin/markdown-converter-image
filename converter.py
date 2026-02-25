@@ -31,14 +31,16 @@ def _extract_exception_message(stderr: str) -> str:
 # File magic bytes
 _OLE2_MAGIC = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'
 _ZIP_MAGIC = b'PK\x03\x04'
+_RTF_MAGIC = b'{\\rtf'
 # Modern Office formats (.xlsx, .pptx, .docx) are ZIP-based.
 # When password-protected, Office wraps them in an OLE2 encrypted container.
 _ZIP_BASED_EXTENSIONS = {".xlsx", ".pptx", ".docx"}
 
 # Extension-to-converter routing table
 PANDOC_EXTENSIONS = {".docx", ".rtf", ".odt", ".txt"}
-MARKITDOWN_EXTENSIONS = {".doc", ".pptx", ".xls", ".xlsx", ".pdf"}
-SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS
+MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
+# .doc is handled separately with a fallback chain (see convert())
+SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 
 DEFAULT_TIMEOUT = 120
 PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "64m")
@@ -92,7 +94,7 @@ def get_converter(extension: str) -> str | None:
     ext = extension.lower()
     if ext in PANDOC_EXTENSIONS:
         return "pandoc"
-    if ext in MARKITDOWN_EXTENSIONS:
+    if ext in MARKITDOWN_EXTENSIONS or ext == ".doc":
         return "markitdown"
     return None
 
@@ -117,10 +119,65 @@ def _check_password_protected(input_path: str, extension: str) -> None:
         )
 
 
+def _detect_doc_format(input_path: str) -> str:
+    """Sniff the actual format of a .doc file.
+
+    Returns 'rtf', 'ole2', or 'unknown'.
+    Many .doc files are actually RTF saved with a .doc extension.
+    True legacy Word documents use the OLE2 binary format.
+    """
+    try:
+        with open(input_path, 'rb') as f:
+            header = f.read(8)
+    except OSError:
+        return 'unknown'
+    if header.startswith(_RTF_MAGIC):
+        return 'rtf'
+    if header.startswith(_OLE2_MAGIC):
+        return 'ole2'
+    return 'unknown'
+
+
+def _convert_doc(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert a .doc file with format detection and fallback.
+
+    .doc files can be RTF (Pandoc handles well) or OLE2 binary Word
+    (MarkItDown may handle).  We sniff the content and try the best
+    converter first, falling back to the other if it fails.
+    """
+    fmt = _detect_doc_format(input_path)
+
+    if fmt == 'rtf':
+        # RTF masquerading as .doc — Pandoc handles this natively
+        logger.info("[Converter] .doc is RTF, using Pandoc")
+        return pandoc_to_markdown(input_path, timeout=timeout)
+
+    # OLE2 binary or unknown — try MarkItDown first, then Pandoc as fallback
+    logger.info("[Converter] .doc is %s format, trying MarkItDown", fmt)
+    try:
+        return markitdown_to_markdown(input_path, timeout=timeout)
+    except RuntimeError as e:
+        logger.warning("[Converter] MarkItDown failed for .doc, trying Pandoc fallback: %s", e)
+    try:
+        return pandoc_to_markdown(input_path, timeout=timeout)
+    except RuntimeError:
+        pass
+
+    raise RuntimeError(
+        "Unable to convert .doc file. The legacy binary Word format (.doc) "
+        "has limited conversion support. Try re-saving as .docx."
+    )
+
+
 def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Route to the appropriate converter based on file extension."""
     _check_password_protected(input_path, extension)
-    converter = get_converter(extension)
+    ext = extension.lower()
+
+    if ext == ".doc":
+        return _convert_doc(input_path, timeout=timeout)
+
+    converter = get_converter(ext)
     if converter == "pandoc":
         logger.info("[Converter] Using Pandoc for %s", extension)
         return pandoc_to_markdown(input_path, timeout=timeout)
