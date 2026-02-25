@@ -127,8 +127,9 @@ async def convert_file(
             media_type="text/markdown; charset=utf-8",
         )
 
-    except ValueError:
-        raise HTTPException(status_code=415, detail=f"Unsupported extension: {ext}")
+    except ValueError as e:
+        detail = str(e) if str(e) else f"Unsupported extension: {ext}"
+        raise HTTPException(status_code=415, detail=detail)
     except HTTPException:
         raise
     except TimeoutError:

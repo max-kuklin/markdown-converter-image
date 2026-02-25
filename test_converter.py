@@ -265,3 +265,56 @@ class TestConverterFunctions:
         from converter import markitdown_to_markdown
         result = markitdown_to_markdown("/tmp/data.xlsx")
         assert "| A | B |" in result
+
+
+# ── Password-protected file detection tests ──────────────────────────────────
+
+class TestPasswordProtectedDetection:
+    OLE2_HEADER = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1' + b'\x00' * 100
+
+    def test_encrypted_xlsx_returns_415(self, tmp_path):
+        """An OLE2-wrapped .xlsx (password-protected) should be rejected with 415."""
+        f = tmp_path / "encrypted.xlsx"
+        f.write_bytes(self.OLE2_HEADER)
+        response = client.post(
+            "/convert",
+            files={"file": ("encrypted.xlsx", f.read_bytes(), "application/octet-stream")},
+            data={"filename": "encrypted.xlsx"},
+        )
+        assert response.status_code == 415
+        assert "password-protected" in response.json()["detail"].lower()
+
+    def test_encrypted_pptx_returns_415(self, tmp_path):
+        f = tmp_path / "encrypted.pptx"
+        f.write_bytes(self.OLE2_HEADER)
+        response = client.post(
+            "/convert",
+            files={"file": ("encrypted.pptx", f.read_bytes(), "application/octet-stream")},
+            data={"filename": "encrypted.pptx"},
+        )
+        assert response.status_code == 415
+        assert "password-protected" in response.json()["detail"].lower()
+
+    def test_encrypted_docx_returns_415(self, tmp_path):
+        f = tmp_path / "encrypted.docx"
+        f.write_bytes(self.OLE2_HEADER)
+        response = client.post(
+            "/convert",
+            files={"file": ("encrypted.docx", f.read_bytes(), "application/octet-stream")},
+            data={"filename": "encrypted.docx"},
+        )
+        assert response.status_code == 415
+        assert "password-protected" in response.json()["detail"].lower()
+
+    def test_normal_xls_not_flagged(self, tmp_path):
+        """OLE2-based .xls files are legitimate and should not be blocked."""
+        f = tmp_path / "normal.xls"
+        f.write_bytes(self.OLE2_HEADER)
+        # .xls is OLE2 natively, so it shouldn't be flagged as password-protected.
+        # It will fail conversion for other reasons (fake content), but not with 415.
+        response = client.post(
+            "/convert",
+            files={"file": ("normal.xls", f.read_bytes(), "application/octet-stream")},
+            data={"filename": "normal.xls"},
+        )
+        assert response.status_code != 415
