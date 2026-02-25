@@ -7,8 +7,8 @@ import os
 logger = logging.getLogger("converter")
 
 # Extension-to-converter routing table
-PANDOC_EXTENSIONS = {".docx", ".doc", ".rtf", ".odt", ".ods", ".txt"}
-MARKITDOWN_EXTENSIONS = {".pptx", ".ppt", ".xls", ".xlsx", ".pdf"}
+PANDOC_EXTENSIONS = {".docx", ".rtf", ".odt", ".txt"}
+MARKITDOWN_EXTENSIONS = {".pptx", ".xlsx", ".pdf"}
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS
 
 DEFAULT_TIMEOUT = 120

@@ -32,6 +32,12 @@ class TestExtensionRouting:
         assert get_converter(".exe") is None
         assert get_converter(".mp3") is None
 
+    def test_legacy_binary_formats_unsupported(self):
+        assert get_converter(".doc") is None
+        assert get_converter(".xls") is None
+        assert get_converter(".ppt") is None
+        assert get_converter(".ods") is None
+
     def test_case_insensitive(self):
         assert get_converter(".DOCX") == "pandoc"
         assert get_converter(".Xlsx") == "markitdown"
