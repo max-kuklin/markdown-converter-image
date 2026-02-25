@@ -34,9 +34,11 @@ class TestExtensionRouting:
 
     def test_legacy_binary_formats_unsupported(self):
         assert get_converter(".doc") is None
-        assert get_converter(".xls") is None
         assert get_converter(".ppt") is None
         assert get_converter(".ods") is None
+
+    def test_xls_uses_markitdown(self):
+        assert get_converter(".xls") == "markitdown"
 
     def test_case_insensitive(self):
         assert get_converter(".DOCX") == "pandoc"
