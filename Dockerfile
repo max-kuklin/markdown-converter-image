@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 
+ARG PANDOC_VERSION=3.6.4
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends pandoc curl && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz" \
+    | tar xz --strip-components=2 -C /usr/local/bin pandoc-${PANDOC_VERSION}/bin/pandoc
 
 RUN groupadd --system app && useradd --system --gid app app
 

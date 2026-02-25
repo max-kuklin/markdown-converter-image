@@ -19,6 +19,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install pandoc
+        run: |
+          PANDOC_VERSION=3.6.4
+          curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz" \
+            | sudo tar xz --strip-components=2 -C /usr/local/bin pandoc-${PANDOC_VERSION}/bin/pandoc
+
       - name: Install dependencies
         run: pip install -r requirements.txt pytest httpx
 
