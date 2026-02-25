@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from converter import SUPPORTED_EXTENSIONS, convert, get_converter
@@ -16,9 +16,12 @@ logger = logging.getLogger("converter")
 
 MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", 50 * 1024 * 1024))  # 50MB
 CONVERSION_TIMEOUT = int(os.environ.get("CONVERSION_TIMEOUT", 120))
-MAX_CONCURRENT_CONVERSIONS = int(os.environ.get("MAX_CONCURRENT_CONVERSIONS", 5))
+MAX_CONCURRENT_CONVERSIONS = int(os.environ.get("MAX_CONCURRENT_CONVERSIONS", 2))
+MAX_QUEUED_CONVERSIONS = int(os.environ.get("MAX_QUEUED_CONVERSIONS", 5))
 
 conversion_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS)
+# Bounds total in-flight requests (active + queued)
+_queue_slots = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS + MAX_QUEUED_CONVERSIONS)
 
 app = FastAPI(title="Markdown Converter Sidecar")
 
@@ -50,6 +53,7 @@ async def health():
 
 @app.post("/convert")
 async def convert_file(
+    request: Request,
     file: UploadFile = File(...),
     filename: str = Form(...),
 ):
@@ -84,10 +88,39 @@ async def convert_file(
             raise HTTPException(status_code=413, detail="File too large")
 
         logger.info("[Converter] Converting %s (%s, %d bytes)", safe_name, ext, file_size)
-        
-        # Limit concurrent conversions and run in a separate thread to avoid blocking the event loop
-        async with conversion_semaphore:
-            markdown = await asyncio.to_thread(convert, tmp_path, ext, CONVERSION_TIMEOUT)
+
+        # Reject immediately if the queue is full (active + waiting >= limit)
+        if _queue_slots.locked():
+            raise HTTPException(status_code=429, detail="Too many conversion requests queued")
+
+        await _queue_slots.acquire()
+        try:
+            # Wait for a conversion slot; check for client disconnect while queued
+            while True:
+                try:
+                    await asyncio.wait_for(conversion_semaphore.acquire(), timeout=1.0)
+                    break
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        logger.info("[Converter] Client disconnected while queued: %s", safe_name)
+                        return PlainTextResponse(content="", status_code=499)
+
+            try:
+                # Run conversion in a thread; periodically check for disconnect
+                loop = asyncio.get_event_loop()
+                task = loop.run_in_executor(None, convert, tmp_path, ext, CONVERSION_TIMEOUT)
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=2.0)
+                    if done:
+                        markdown = task.result()
+                        break
+                    if await request.is_disconnected():
+                        logger.info("[Converter] Client disconnected during conversion: %s", safe_name)
+                        return PlainTextResponse(content="", status_code=499)
+            finally:
+                conversion_semaphore.release()
+        finally:
+            _queue_slots.release()
 
         # Explicitly delete the file before returning the response to free disk space immediately
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -99,6 +132,8 @@ async def convert_file(
 
     except ValueError:
         raise HTTPException(status_code=415, detail=f"Unsupported extension: {ext}")
+    except HTTPException:
+        raise
     except TimeoutError:
         raise HTTPException(status_code=504, detail="Conversion timed out")
     except subprocess.TimeoutExpired:

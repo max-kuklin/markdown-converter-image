@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app import app, sanitize_filename
+from app import app, sanitize_filename, _queue_slots, MAX_CONCURRENT_CONVERSIONS, MAX_QUEUED_CONVERSIONS
 from converter import (
     MARKITDOWN_EXTENSIONS,
     PANDOC_EXTENSIONS,
@@ -175,6 +175,41 @@ class TestTempFileCleanup:
         # Temp dir should still be cleaned up via finally block
 
 
+# ── Queue limit tests ───────────────────────────────────────────────────────
+
+class TestQueueLimit:
+    @patch("app.convert")
+    def test_returns_429_when_queue_full(self, mock_convert):
+        """When all queue slots are exhausted, new requests get 429."""
+        total_slots = MAX_CONCURRENT_CONVERSIONS + MAX_QUEUED_CONVERSIONS
+        # Drain all semaphore slots to simulate a full queue
+        for _ in range(total_slots):
+            _queue_slots._value -= 1
+        try:
+            response = client.post(
+                "/convert",
+                files={"file": ("test.docx", b"content", "application/octet-stream")},
+                data={"filename": "test.docx"},
+            )
+            assert response.status_code == 429
+            assert "queued" in response.json()["detail"].lower()
+        finally:
+            # Restore semaphore
+            for _ in range(total_slots):
+                _queue_slots._value += 1
+
+    @patch("app.convert")
+    def test_accepts_request_when_queue_has_room(self, mock_convert):
+        """When queue has room, request should succeed normally."""
+        mock_convert.return_value = "# OK"
+        response = client.post(
+            "/convert",
+            files={"file": ("test.docx", b"content", "application/octet-stream")},
+            data={"filename": "test.docx"},
+        )
+        assert response.status_code == 200
+
+
 # ── Converter function unit tests ────────────────────────────────────────────
 
 class TestConverterFunctions:
@@ -182,10 +217,20 @@ class TestConverterFunctions:
     def test_pandoc_success(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=b"# Converted\n\nText content.",
+            stderr=b"",
         )
         from converter import pandoc_to_markdown
 
+        # pandoc_to_markdown writes to a temp file via -o; simulate by writing to it
+        def fake_run(cmd, **kwargs):
+            # Find the -o flag and write content to that path
+            out_idx = cmd.index("-o")
+            out_path = cmd[out_idx + 1]
+            with open(out_path, "w") as f:
+                f.write("# Converted\n\nText content.")
+            return MagicMock(returncode=0, stderr=b"")
+
+        mock_run.side_effect = fake_run
         result = pandoc_to_markdown("/tmp/test.docx")
         assert "Converted" in result
         mock_run.assert_called_once()
@@ -211,13 +256,15 @@ class TestConverterFunctions:
         with pytest.raises(subprocess.TimeoutExpired):
             pandoc_to_markdown("/tmp/slow.docx", timeout=120)
 
-    @patch("converter.MarkItDown")
-    def test_markitdown_success(self, mock_md_class):
+    @patch("converter.markitdown_to_markdown.__module__", "converter")
+    def test_markitdown_success(self):
         mock_result = MagicMock()
         mock_result.text_content = "| A | B |\n|---|---|\n| 1 | 2 |"
+        mock_md_class = MagicMock()
         mock_md_class.return_value.convert.return_value = mock_result
 
-        from converter import markitdown_to_markdown
+        with patch.dict("sys.modules", {"markitdown": MagicMock(MarkItDown=mock_md_class)}):
+            from converter import markitdown_to_markdown
 
-        result = markitdown_to_markdown("/tmp/data.xlsx")
-        assert "| A | B |" in result
+            result = markitdown_to_markdown("/tmp/data.xlsx")
+            assert "| A | B |" in result
