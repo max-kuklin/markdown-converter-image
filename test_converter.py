@@ -256,15 +256,17 @@ class TestConverterFunctions:
         with pytest.raises(subprocess.TimeoutExpired):
             pandoc_to_markdown("/tmp/slow.docx", timeout=120)
 
-    @patch("converter.markitdown_to_markdown.__module__", "converter")
-    def test_markitdown_success(self):
-        mock_result = MagicMock()
-        mock_result.text_content = "| A | B |\n|---|---|\n| 1 | 2 |"
-        mock_md_class = MagicMock()
-        mock_md_class.return_value.convert.return_value = mock_result
+    @patch("converter.subprocess.run")
+    def test_markitdown_success(self, mock_run):
+        expected_md = "| A | B |\n|---|---|\n| 1 | 2 |"
+        def fake_run(cmd, **kwargs):
+            # Write expected output to the temp file (second-to-last arg)
+            out_path = cmd[-1]
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(expected_md)
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+        mock_run.side_effect = fake_run
 
-        with patch.dict("sys.modules", {"markitdown": MagicMock(MarkItDown=mock_md_class)}):
-            from converter import markitdown_to_markdown
-
-            result = markitdown_to_markdown("/tmp/data.xlsx")
-            assert "| A | B |" in result
+        from converter import markitdown_to_markdown
+        result = markitdown_to_markdown("/tmp/data.xlsx")
+        assert "| A | B |" in result

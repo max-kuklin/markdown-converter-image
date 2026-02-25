@@ -1,5 +1,6 @@
 import subprocess
 import logging
+import sys
 import tempfile
 import os
 
@@ -39,16 +40,40 @@ def pandoc_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
             pass
 
 
-def markitdown_to_markdown(input_path: str) -> str:
-    """Convert a document to Markdown using MarkItDown."""
-    from markitdown import MarkItDown
+def markitdown_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert a document to Markdown using MarkItDown in a subprocess.
 
-    md = MarkItDown()
-    result = md.convert(input_path)
-    
-    markdown_output = result.text_content
-    del result
-    return markdown_output
+    Running in a subprocess ensures all memory is returned to the OS when
+    the conversion finishes, instead of fragmenting the main process heap.
+    """
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as out_f:
+        out_path = out_f.name
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys, os; "
+                "from markitdown import MarkItDown; "
+                "md = MarkItDown(); "
+                "r = md.convert(sys.argv[1]); "
+                "open(sys.argv[2], 'w', encoding='utf-8').write(r.text_content)",
+                input_path,
+                out_path,
+            ],
+            capture_output=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"MarkItDown conversion failed: {stderr}")
+        del result
+        with open(out_path, "r", encoding="utf-8") as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
 
 
 def get_converter(extension: str) -> str | None:
@@ -69,6 +94,6 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
         return pandoc_to_markdown(input_path, timeout=timeout)
     elif converter == "markitdown":
         logger.info("[Converter] Using MarkItDown for %s", extension)
-        return markitdown_to_markdown(input_path)
+        return markitdown_to_markdown(input_path, timeout=timeout)
     else:
         raise ValueError(f"Unsupported extension: {extension}")
