@@ -7,7 +7,7 @@ logger = logging.getLogger("converter")
 
 # Extension-to-converter routing table
 PANDOC_EXTENSIONS = {".docx", ".rtf", ".odt", ".txt"}
-MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
+MARKITDOWN_EXTENSIONS = {".doc", ".pptx", ".xls", ".xlsx", ".pdf"}
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS
 
 DEFAULT_TIMEOUT = 120
