@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -15,6 +16,9 @@ logger = logging.getLogger("converter")
 
 MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", 50 * 1024 * 1024))  # 50MB
 CONVERSION_TIMEOUT = int(os.environ.get("CONVERSION_TIMEOUT", 120))
+MAX_CONCURRENT_CONVERSIONS = int(os.environ.get("MAX_CONCURRENT_CONVERSIONS", 5))
+
+conversion_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS)
 
 app = FastAPI(title="Markdown Converter Sidecar")
 
@@ -66,20 +70,27 @@ async def convert_file(
             detail=f"Unsupported file extension: {ext or '(none)'}",
         )
 
-    # Check file size
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail="File too large")
-
     tmp_dir = tempfile.mkdtemp()
     tmp_path = os.path.join(tmp_dir, safe_name)
 
     try:
+        # Stream the file to disk to avoid loading it entirely into memory
         with open(tmp_path, "wb") as f:
-            f.write(content)
+            shutil.copyfileobj(file.file, f)
 
-        logger.info("[Converter] Converting %s (%s, %d bytes)", safe_name, ext, len(content))
-        markdown = convert(tmp_path, ext, timeout=CONVERSION_TIMEOUT)
+        # Check file size after writing
+        file_size = os.path.getsize(tmp_path)
+        if file_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="File too large")
+
+        logger.info("[Converter] Converting %s (%s, %d bytes)", safe_name, ext, file_size)
+        
+        # Limit concurrent conversions and run in a separate thread to avoid blocking the event loop
+        async with conversion_semaphore:
+            markdown = await asyncio.to_thread(convert, tmp_path, ext, CONVERSION_TIMEOUT)
+
+        # Explicitly delete the file before returning the response to free disk space immediately
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return PlainTextResponse(
             content=markdown,

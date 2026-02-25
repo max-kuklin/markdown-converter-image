@@ -15,22 +15,31 @@ DEFAULT_TIMEOUT = 120
 
 def pandoc_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Convert a document to Markdown using Pandoc CLI."""
+    # Use +RTS -M64m -RTS to limit Pandoc's memory usage to 64MB
     result = subprocess.run(
-        ["pandoc", input_path, "-t", "markdown", "--wrap=none"],
+        ["pandoc", "+RTS", "-M64m", "-RTS", input_path, "-t", "markdown", "--wrap=none"],
         capture_output=True,
         timeout=timeout,
     )
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"Pandoc conversion failed: {stderr}")
-    return result.stdout.decode("utf-8")
+    
+    # Decode the output and explicitly delete the result object to free memory
+    markdown_output = result.stdout.decode("utf-8")
+    del result
+    return markdown_output
 
 
 def markitdown_to_markdown(input_path: str) -> str:
     """Convert a document to Markdown using MarkItDown."""
     md = MarkItDown()
     result = md.convert(input_path)
-    return result.text_content
+    
+    # Extract text and explicitly delete the result object to free memory
+    markdown_output = result.text_content
+    del result
+    return markdown_output
 
 
 def get_converter(extension: str) -> str | None:
