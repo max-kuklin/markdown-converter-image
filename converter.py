@@ -1,8 +1,7 @@
 import subprocess
 import logging
-import sys
-import tempfile
 import os
+import sys
 
 logger = logging.getLogger("converter")
 
@@ -12,32 +11,23 @@ MARKITDOWN_EXTENSIONS = {".pptx", ".xlsx", ".pdf"}
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS
 
 DEFAULT_TIMEOUT = 120
+PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "64m")
+PANDOC_INITIAL_HEAP = os.environ.get("PANDOC_INITIAL_HEAP", "32m")
 
 
 def pandoc_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Convert a document to Markdown using Pandoc CLI."""
-    # Stream pandoc stdout to a temp file to avoid buffering the entire output in memory.
-    # Use +RTS -M32m -H8m -RTS to limit Pandoc's heap to 32MB with an 8MB initial allocation.
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as out_f:
-        out_path = out_f.name
-    try:
-        result = subprocess.run(
-            ["pandoc", "+RTS", "-M32m", "-H8m", "-RTS", input_path,
-             "-t", "markdown", "--wrap=none", "-o", out_path],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"Pandoc conversion failed: {stderr}")
-        del result
-        with open(out_path, "r", encoding="utf-8") as f:
-            return f.read()
-    finally:
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+    # -M sets the max heap ceiling (not a reservation); -H sets the initial allocation hint.
+    result = subprocess.run(
+        ["pandoc", "+RTS", f"-M{PANDOC_MAX_HEAP}", f"-H{PANDOC_INITIAL_HEAP}", "-RTS",
+         input_path, "-t", "markdown", "--wrap=none"],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"Pandoc conversion failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def markitdown_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
@@ -46,34 +36,23 @@ def markitdown_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> s
     Running in a subprocess ensures all memory is returned to the OS when
     the conversion finishes, instead of fragmenting the main process heap.
     """
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as out_f:
-        out_path = out_f.name
-    try:
-        result = subprocess.run(
-            [
-                sys.executable, "-c",
-                "import sys, os; "
-                "from markitdown import MarkItDown; "
-                "md = MarkItDown(); "
-                "r = md.convert(sys.argv[1]); "
-                "open(sys.argv[2], 'w', encoding='utf-8').write(r.text_content)",
-                input_path,
-                out_path,
-            ],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(f"MarkItDown conversion failed: {stderr}")
-        del result
-        with open(out_path, "r", encoding="utf-8") as f:
-            return f.read()
-    finally:
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import sys; "
+            "from markitdown import MarkItDown; "
+            "md = MarkItDown(); "
+            "r = md.convert(sys.argv[1]); "
+            "sys.stdout.buffer.write(r.text_content.encode('utf-8'))",
+            input_path,
+        ],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"MarkItDown conversion failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def get_converter(extension: str) -> str | None:

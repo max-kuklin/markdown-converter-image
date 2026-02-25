@@ -223,20 +223,11 @@ class TestConverterFunctions:
     def test_pandoc_success(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
+            stdout=b"# Converted\n\nText content.",
             stderr=b"",
         )
         from converter import pandoc_to_markdown
 
-        # pandoc_to_markdown writes to a temp file via -o; simulate by writing to it
-        def fake_run(cmd, **kwargs):
-            # Find the -o flag and write content to that path
-            out_idx = cmd.index("-o")
-            out_path = cmd[out_idx + 1]
-            with open(out_path, "w") as f:
-                f.write("# Converted\n\nText content.")
-            return MagicMock(returncode=0, stderr=b"")
-
-        mock_run.side_effect = fake_run
         result = pandoc_to_markdown("/tmp/test.docx")
         assert "Converted" in result
         mock_run.assert_called_once()
@@ -265,13 +256,9 @@ class TestConverterFunctions:
     @patch("converter.subprocess.run")
     def test_markitdown_success(self, mock_run):
         expected_md = "| A | B |\n|---|---|\n| 1 | 2 |"
-        def fake_run(cmd, **kwargs):
-            # Write expected output to the temp file (second-to-last arg)
-            out_path = cmd[-1]
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write(expected_md)
-            return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-        mock_run.side_effect = fake_run
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], returncode=0, stdout=expected_md.encode("utf-8"), stderr=b"",
+        )
 
         from converter import markitdown_to_markdown
         result = markitdown_to_markdown("/tmp/data.xlsx")
