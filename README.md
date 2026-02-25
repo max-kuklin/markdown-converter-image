@@ -6,10 +6,13 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 
 | Extension | Converter |
 |-----------|-----------|
-| `.docx`, `.doc`, `.rtf`, `.odt`, `.ods`, `.txt` | Pandoc |
-| `.pptx`, `.ppt` | MarkItDown |
+| `.docx`, `.rtf`, `.odt`, `.txt` | Pandoc |
+| `.doc` | Pandoc or MarkItDown (auto-detected; RTF → Pandoc, OLE2 binary → MarkItDown with Pandoc fallback) |
+| `.pptx` | MarkItDown |
 | `.xls`, `.xlsx` | MarkItDown |
 | `.pdf` | MarkItDown |
+
+Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early.
 
 ## API
 
@@ -19,7 +22,17 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 curl -F "file=@document.docx" -F "filename=document.docx" http://localhost:8100/convert
 ```
 
-Returns `text/markdown` on success. Status codes: `415` (unsupported format), `422` (conversion failed), `504` (timeout).
+Returns `text/markdown` on success.
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success |
+| `400` | Missing or invalid filename |
+| `413` | File too large |
+| `415` | Unsupported format or password-protected file |
+| `422` | Conversion failed |
+| `429` | Too many conversion requests queued |
+| `504` | Conversion timed out |
 
 **`GET /health`** — Health check
 
@@ -49,6 +62,12 @@ uvicorn app:app --port 8100
 |---------------------|---------|-------------|
 | `MAX_UPLOAD_SIZE` | `52428800` (50MB) | Maximum upload size in bytes |
 | `CONVERSION_TIMEOUT` | `120` | Subprocess timeout in seconds |
+| `MAX_CONCURRENT_CONVERSIONS` | `2` | Maximum parallel conversions |
+| `MAX_QUEUED_CONVERSIONS` | `5` | Maximum requests waiting in queue |
+| `PANDOC_MAX_HEAP` | `64m` | Pandoc RTS max heap size (`-M`) |
+| `PANDOC_INITIAL_HEAP` | `32m` | Pandoc RTS initial heap hint (`-H`) |
+
+For default values above, container memory limits should be set to at least 512MB to avoid OOM errors.
 
 ## Testing
 
