@@ -89,11 +89,83 @@ def markitdown_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> s
     return result.stdout.decode("utf-8", errors="replace")
 
 
+def xlsx_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert an .xlsx file to Markdown using openpyxl directly in a subprocess.
+
+    Avoids MarkItDown's xlsx→HTML→BeautifulSoup pipeline, which hangs on
+    spreadsheets with many empty trailing columns (e.g. 16 000+ cols).
+    We read only the actual data extent per sheet and emit Markdown tables.
+    """
+    script = r'''
+import sys, openpyxl
+
+path = sys.argv[1]
+wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+parts = []
+for ws in wb.worksheets:
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        continue
+    ncols = max(len(r) for r in rows) if rows else 0
+    if ncols == 0:
+        continue
+    # Count how many rows have data in each column
+    col_count = [0] * ncols
+    for row in rows:
+        for i, c in enumerate(row):
+            if c is not None and str(c).strip():
+                col_count[i] += 1
+    # Find the effective max column: ignore stray outliers separated
+    # by a gap of 10+ consecutive empty columns from the main data block.
+    max_col = 0
+    gap = 0
+    for i in range(ncols):
+        if col_count[i] > 0:
+            max_col = i + 1
+            gap = 0
+        else:
+            gap += 1
+            if gap >= 10 and max_col > 0:
+                break
+    if max_col == 0:
+        continue
+    # Trim trailing fully-empty rows
+    while rows and all(
+        (c is None or str(c).strip() == "") for c in rows[-1][:max_col]
+    ):
+        rows.pop()
+    if not rows:
+        continue
+    parts.append(f"## {ws.title}")
+    for ri, row in enumerate(rows):
+        cells = [str(c) if c is not None else "" for c in row[:max_col]]
+        parts.append("| " + " | ".join(cells) + " |")
+        if ri == 0:
+            parts.append("| " + " | ".join("---" for _ in cells) + " |")
+parts.append("")
+wb.close()
+sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, input_path],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        clean_msg = _extract_exception_message(stderr)
+        logger.error("[Converter] xlsx_to_markdown stderr: %s", stderr)
+        raise RuntimeError(f"XLSX conversion failed: {clean_msg}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def get_converter(extension: str) -> str | None:
     """Return the converter name for a given extension, or None if unsupported."""
     ext = extension.lower()
     if ext in PANDOC_EXTENSIONS:
         return "pandoc"
+    if ext == ".xlsx":
+        return "xlsx"
     if ext in MARKITDOWN_EXTENSIONS or ext == ".doc":
         return "markitdown"
     return None
@@ -181,6 +253,9 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
     if converter == "pandoc":
         logger.info("[Converter] Using Pandoc for %s", extension)
         return pandoc_to_markdown(input_path, timeout=timeout)
+    elif converter == "xlsx":
+        logger.info("[Converter] Using openpyxl for %s", extension)
+        return xlsx_to_markdown(input_path, timeout=timeout)
     elif converter == "markitdown":
         logger.info("[Converter] Using MarkItDown for %s", extension)
         return markitdown_to_markdown(input_path, timeout=timeout)

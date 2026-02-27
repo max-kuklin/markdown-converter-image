@@ -9,7 +9,8 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 | `.docx`, `.rtf`, `.odt`, `.txt` | Pandoc |
 | `.doc` | Pandoc or MarkItDown (auto-detected; RTF → Pandoc, OLE2 binary → MarkItDown with Pandoc fallback) |
 | `.pptx` | MarkItDown |
-| `.xls`, `.xlsx` | MarkItDown |
+| `.xls` | MarkItDown |
+| `.xlsx` | openpyxl (direct) |
 | `.pdf` | MarkItDown |
 
 Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early.
