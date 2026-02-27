@@ -143,60 +143,29 @@ sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
 
 
 def xlsx_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
-    """Convert an .xlsx file to Markdown using openpyxl directly in a subprocess.
+    """Convert an .xlsx file to Markdown using python-calamine in a subprocess.
 
-    Avoids MarkItDown's xlsx→HTML→BeautifulSoup pipeline, which hangs on
-    spreadsheets with many empty trailing columns (e.g. 16 000+ cols).
-    We read only the actual data extent per sheet and emit Markdown tables.
+    Calamine (Rust-based) is fast, tolerant of unusual styles/fills that
+    trip up openpyxl, and already used for .xls files.
     """
     script = r'''
-import sys, openpyxl
+import sys
+from python_calamine import CalamineWorkbook
 
 path = sys.argv[1]
-wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+wb = CalamineWorkbook.from_path(path)
 parts = []
-for ws in wb.worksheets:
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
+for name in wb.sheet_names:
+    data = wb.get_sheet_by_name(name).to_python()
+    if not data:
         continue
-    ncols = max(len(r) for r in rows) if rows else 0
-    if ncols == 0:
-        continue
-    # Count how many rows have data in each column
-    col_count = [0] * ncols
-    for row in rows:
-        for i, c in enumerate(row):
-            if c is not None and str(c).strip():
-                col_count[i] += 1
-    # Find the effective max column: ignore stray outliers separated
-    # by a gap of 10+ consecutive empty columns from the main data block.
-    max_col = 0
-    gap = 0
-    for i in range(ncols):
-        if col_count[i] > 0:
-            max_col = i + 1
-            gap = 0
-        else:
-            gap += 1
-            if gap >= 10 and max_col > 0:
-                break
-    if max_col == 0:
-        continue
-    # Trim trailing fully-empty rows
-    while rows and all(
-        (c is None or str(c).strip() == "") for c in rows[-1][:max_col]
-    ):
-        rows.pop()
-    if not rows:
-        continue
-    parts.append(f"## {ws.title}")
-    for ri, row in enumerate(rows):
-        cells = [str(c) if c is not None else "" for c in row[:max_col]]
+    parts.append(f"## {name}")
+    for ri, row in enumerate(data):
+        cells = [str(c) if c is not None else "" for c in row]
         parts.append("| " + " | ".join(cells) + " |")
         if ri == 0:
             parts.append("| " + " | ".join("---" for _ in cells) + " |")
-parts.append("")
-wb.close()
+    parts.append("")
 sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
 '''
     result = subprocess.run(
@@ -317,7 +286,7 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
         logger.info("[Converter] Using Pandoc for %s", extension)
         return pandoc_to_markdown(input_path, timeout=timeout)
     elif converter == "xlsx":
-        logger.info("[Converter] Using openpyxl for %s", extension)
+        logger.info("[Converter] Using calamine for %s", extension)
         return xlsx_to_markdown(input_path, timeout=timeout)
     elif converter == "xls":
         logger.info("[Converter] Using calamine for %s", extension)
