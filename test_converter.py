@@ -24,12 +24,15 @@ class TestExtensionRouting:
     def test_pandoc_extensions(self, ext):
         assert get_converter(ext) == "pandoc"
 
-    @pytest.mark.parametrize("ext", sorted(MARKITDOWN_EXTENSIONS - {".xlsx"}))
+    @pytest.mark.parametrize("ext", sorted(MARKITDOWN_EXTENSIONS - {".xlsx", ".xls"}))
     def test_markitdown_extensions(self, ext):
         assert get_converter(ext) == "markitdown"
 
     def test_xlsx_extension(self):
         assert get_converter(".xlsx") == "xlsx"
+
+    def test_xls_extension(self):
+        assert get_converter(".xls") == "xls"
 
     def test_unsupported_extension(self):
         assert get_converter(".zip") is None
@@ -42,7 +45,9 @@ class TestExtensionRouting:
 
     def test_legacy_binary_formats_use_markitdown(self):
         assert get_converter(".doc") == "markitdown"
-        assert get_converter(".xls") == "markitdown"
+
+    def test_legacy_binary_formats_use_dedicated_converter(self):
+        assert get_converter(".xls") == "xls"
 
     def test_case_insensitive(self):
         assert get_converter(".DOCX") == "pandoc"

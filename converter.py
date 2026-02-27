@@ -103,6 +103,45 @@ def markitdown_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> s
     return result.stdout.decode("utf-8", errors="replace")
 
 
+def xls_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert a legacy .xls file to Markdown using python-calamine in a subprocess.
+
+    xlrd 2.x rejects some .xls files with OLE2 FAT chain issues;
+    python-calamine (Rust-based) is more tolerant and faster.
+    """
+    script = r'''
+import sys
+from python_calamine import CalamineWorkbook
+
+path = sys.argv[1]
+wb = CalamineWorkbook.from_path(path)
+parts = []
+for name in wb.sheet_names:
+    data = wb.get_sheet_by_name(name).to_python()
+    if not data:
+        continue
+    parts.append(f"## {name}")
+    for ri, row in enumerate(data):
+        cells = [str(c) if c is not None else "" for c in row]
+        parts.append("| " + " | ".join(cells) + " |")
+        if ri == 0:
+            parts.append("| " + " | ".join("---" for _ in cells) + " |")
+    parts.append("")
+sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, input_path],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        clean_msg = _extract_exception_message(stderr)
+        logger.error("[Converter] xls_to_markdown stderr: %s", stderr)
+        raise RuntimeError(f"XLS conversion failed: {clean_msg}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def xlsx_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Convert an .xlsx file to Markdown using openpyxl directly in a subprocess.
 
@@ -180,6 +219,8 @@ def get_converter(extension: str) -> str | None:
         return "pandoc"
     if ext == ".xlsx":
         return "xlsx"
+    if ext == ".xls":
+        return "xls"
     if ext in MARKITDOWN_EXTENSIONS or ext == ".doc":
         return "markitdown"
     return None
@@ -278,6 +319,9 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
     elif converter == "xlsx":
         logger.info("[Converter] Using openpyxl for %s", extension)
         return xlsx_to_markdown(input_path, timeout=timeout)
+    elif converter == "xls":
+        logger.info("[Converter] Using calamine for %s", extension)
+        return xls_to_markdown(input_path, timeout=timeout)
     elif converter == "markitdown":
         logger.info("[Converter] Using MarkItDown for %s", extension)
         return markitdown_to_markdown(input_path, timeout=timeout)

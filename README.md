@@ -9,7 +9,7 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 | `.docx`, `.rtf`, `.odt`, `.txt` | Pandoc |
 | `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain |
 | `.pptx` | MarkItDown |
-| `.xls` | MarkItDown |
+| `.xls` | python-calamine (direct) |
 | `.xlsx` | openpyxl (direct) |
 | `.pdf` | MarkItDown |
 
