@@ -50,7 +50,7 @@ class TestExtensionRouting:
         assert get_converter(".xls") == "xls"
 
     def test_case_insensitive(self):
-        assert get_converter(".DOCX") == "markitdown"
+        assert get_converter(".DOCX") == "pandoc"
         assert get_converter(".Xlsx") == "xlsx"
         assert get_converter(".PDF") == "markitdown"
 
@@ -471,3 +471,9 @@ class TestDocConversion:
             mock_pandoc.assert_not_called()
         finally:
             os.unlink(tmp.name)
+
+
+class TestDocxConversion:
+    def test_docx_routes_to_pandoc(self):
+        """.docx should route directly to Pandoc (faster, lower memory than MarkItDown)."""
+        assert get_converter(".docx") == "pandoc"

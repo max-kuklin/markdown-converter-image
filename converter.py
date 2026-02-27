@@ -38,8 +38,8 @@ _RTF_MAGIC = b'{\\rtf'
 _ZIP_BASED_EXTENSIONS = {".xlsx", ".pptx", ".docx"}
 
 # Extension-to-converter routing table
-PANDOC_EXTENSIONS = {".rtf", ".odt", ".txt"}
-MARKITDOWN_EXTENSIONS = {".docx", ".pptx", ".xls", ".xlsx", ".pdf"}
+PANDOC_EXTENSIONS = {".rtf", ".odt", ".txt", ".docx"}
+MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
 # .doc is handled separately with a fallback chain (see convert())
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 

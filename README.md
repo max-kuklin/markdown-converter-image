@@ -6,11 +6,10 @@ A lightweight memory-efficient HTTP API in a Docker Image that converts document
 
 | Extension | Converter |
 |-----------|-----------|
-| `.rtf`, `.odt`, `.txt` | Pandoc |
+| `.rtf`, `.odt`, `.txt`, `.docx` | Pandoc |
 | `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain |
-| `.docx`, `.pptx` | MarkItDown |
+| `.pptx`, `.pdf` | MarkItDown |
 | `.xls`, `.xlsx` | python-calamine (direct) |
-| `.pdf` | MarkItDown |
 
 Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early.
 
@@ -64,7 +63,7 @@ uvicorn app:app --port 8100
 | `CONVERSION_TIMEOUT` | `120` | Subprocess timeout in seconds |
 | `MAX_CONCURRENT_CONVERSIONS` | `1` | Maximum parallel conversions |
 | `MAX_QUEUED_CONVERSIONS` | `5` | Maximum requests waiting in queue |
-| `PANDOC_MAX_HEAP` | `96m` | Pandoc RTS max heap size (`-M`); only applies to `.rtf`/`.odt`/`.txt` |
+| `PANDOC_MAX_HEAP` | `96m` | Pandoc RTS max heap size (`-M`); applies to `.rtf`/`.odt`/`.txt` and `.docx` |
 
 For default values above, container memory limits should be set to at least 256MB to avoid OOM errors.
 
@@ -77,4 +76,4 @@ python -m pytest test_converter.py -v
 
 ## Tech Stack
 
-Python 3.12 · FastAPI · Pandoc · MarkItDown · antiword
+Python 3.12 · FastAPI · Pandoc · MarkItDown · python-calamine · antiword
