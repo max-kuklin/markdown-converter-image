@@ -25,7 +25,7 @@ conversion_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS)
 # Bounds total in-flight requests (active + queued)
 _queue_slots = asyncio.Semaphore(MAX_CONCURRENT_CONVERSIONS + MAX_QUEUED_CONVERSIONS)
 
-app = FastAPI(title="Markdown Converter Sidecar")
+app = FastAPI(title="Markdown Converter Image")
 
 SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 

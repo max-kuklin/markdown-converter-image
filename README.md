@@ -1,6 +1,6 @@
-# Markdown Converter Sidecar
+# Markdown Converter Image
 
-A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](https://pandoc.org/) and [MarkItDown](https://github.com/microsoft/markitdown). Designed to run alongside a Node.js application as a sidecar container.
+A lightweight memory-efficient HTTP API in a Docker Image that converts documents to Markdown using multiple converters.
 
 ## Supported Formats
 

@@ -2,32 +2,32 @@
 
 ## Goal
 
-Replace the in-process Pandoc CLI wrapper with a dedicated sidecar container that hosts both Pandoc and MarkItDown behind a single HTTP API. This unblocks XLS/XLSX support (currently excluded because Pandoc cannot handle them) and improves PDF text extraction quality, while keeping the Node.js image slim and decoupling converter lifecycle from application deployments.
+Replace the in-process Pandoc CLI wrapper with a dedicated Image container that hosts both Pandoc and MarkItDown behind a single HTTP API. This unblocks XLS/XLSX support (currently excluded because Pandoc cannot handle them) and improves PDF text extraction quality, while keeping the Node.js image slim and decoupling converter lifecycle from application deployments.
 
 ## Scope
 
 ### Included
 - Python-based HTTP service (FastAPI) hosting Pandoc and MarkItDown converters
 - Single `/convert` endpoint accepting file bytes and returning Markdown text
-- Extension-based routing to the appropriate converter inside the sidecar
-- Dockerfile for the sidecar container (`Dockerfile.converter`)
-- Sidecar entry in `docker-compose.test.yml` for local development and integration testing
+- Extension-based routing to the appropriate converter inside the Image
+- Dockerfile for the Image container (`Dockerfile.converter`)
+- Image entry in `docker-compose.test.yml` for local development and integration testing
 - `common/services/document-converter.js` — new Node.js HTTP client replacing direct Pandoc subprocess calls
 - Deprecation and removal of `common/services/pandoc.js` subprocess wrapper
 - Enable `.xls` and `.xlsx` in the discovery `ALLOWED_EXTENSIONS`
 - Configuration for the converter service URL and timeouts
-- Health check endpoint on the sidecar (`GET /health`)
+- Health check endpoint on the Image (`GET /health`)
 
 ### Excluded
-- Kubernetes manifests (out of scope — infrastructure team handles K8s sidecar injection)
-- Authentication between Node.js and sidecar (localhost-only in both K8s pod and Docker Compose)
+- Kubernetes manifests (out of scope — infrastructure team handles K8s Image injection)
+- Authentication between Node.js and Image (localhost-only in both K8s pod and Docker Compose)
 - OCR support for scanned PDFs (future enhancement)
 - Fallback chains (if primary converter fails, candidate is marked `conversion_failed` — same as today)
 - Changes to the extraction loop logic in `extraction.service.js` beyond swapping the converter import
 
 ## Implementation Details
 
-### Sidecar Container
+### Image Container
 
 **Tech stack:** Python 3.12-slim, FastAPI, uvicorn, Pandoc (apt), `markitdown[pdf,xlsx,pptx,docx]`
 
@@ -53,7 +53,7 @@ Response: `200 OK` with `{"status": "ok", "pandoc": true, "markitdown": true}`
 
 Validates both tools are functional at startup and on each health check by checking CLI/library availability.
 
-**Extension routing inside the sidecar:**
+**Extension routing inside the Image:**
 
 | Extension | Converter | Rationale |
 |-----------|-----------|-----------|
@@ -62,7 +62,7 @@ Validates both tools are functional at startup and on each health check by check
 | `.xls`, `.xlsx` | MarkItDown | Pandoc has no spreadsheet support |
 | `.pdf` | MarkItDown | Uses pdfminer — better text extraction than Pandoc for PDFs |
 
-The routing table is defined in the sidecar code. The Node.js side does not need to know which converter is used — it sends the file and gets Markdown back.
+The routing table is defined in the Image code. The Node.js side does not need to know which converter is used — it sends the file and gets Markdown back.
 
 **Temp file handling:**
 - Incoming file bytes are written to a temp directory
@@ -75,7 +75,7 @@ The routing table is defined in the sidecar code. The Node.js side does not need
 - Per-conversion subprocess timeout enforced inside the Python handler (configurable, default 120s)
 - The handler kills the converter subprocess if it exceeds the timeout and returns 504
 
-### Sidecar Source Location
+### Image Source Location
 
 ```
 Dockerfile
@@ -85,7 +85,7 @@ requirements.txt  # Python dependencies
 test_converter.py # pytest unit tests
 ```
 
-Placed at the repository root alongside `Dockerfile` (the main Node.js app). The sidecar is an independent build artifact.
+Placed at the repository root alongside `Dockerfile` (the main Node.js app). The Image is an independent build artifact.
 
 ### `app.py` — API structure
 
@@ -159,7 +159,7 @@ cd converter && pip install -r requirements.txt && uvicorn app:app --port 8100
 
 For the infrastructure team — not implemented by this PRD:
 
-- Deploy as a sidecar container in the same pod as the Node.js app
+- Deploy as a Image container in the same pod as the Node.js app
 - Port 8100, no external ingress needed
 - Resource suggestions: `requests: 256Mi/200m`, `limits: 1Gi/1000m` (conversion is CPU-heavy)
 - Liveness probe: `GET /health` every 30s
@@ -168,7 +168,7 @@ For the infrastructure team — not implemented by this PRD:
 
 ## Acceptance Criteria
 
-- The converter sidecar starts and responds to `GET /health` with status 200
+- The converter Image starts and responds to `GET /health` with status 200
 - `POST /convert` with a `.docx` file returns Markdown via Pandoc
 - `POST /convert` with a `.xlsx` file returns Markdown via MarkItDown
 - `POST /convert` with a `.pdf` file returns Markdown via MarkItDown
@@ -176,7 +176,7 @@ For the infrastructure team — not implemented by this PRD:
 - `POST /convert` with an unsupported extension (e.g., `.zip`) returns 415
 - `POST /convert` with a corrupt file returns 422
 - Temp files are cleaned up after every conversion (success and failure)
-- The Node.js `document-converter.js` client successfully calls the sidecar and returns Markdown
+- The Node.js `document-converter.js` client successfully calls the Image and returns Markdown
 - The Node.js client throws with a clear error message on HTTP failures
 - The extraction service uses `document-converter.js` instead of `pandoc.js`
 - `.xls` and `.xlsx` appear in discovery `ALLOWED_EXTENSIONS`
@@ -196,7 +196,7 @@ For the infrastructure team — not implemented by this PRD:
 - Mock subprocess/MarkItDown calls to test error handling paths
 - Test temp file cleanup on success and failure
 
-**Curl validation (manual — after sidecar is running):**
+**Curl validation (manual — after Image is running):**
 1. Start converter via `docker compose up converter`
 2. Health: `curl http://localhost:8100/health` → 200, JSON with status ok
 3. DOCX: `curl -F "file=@sample.docx" -F "filename=sample.docx" http://localhost:8100/convert` → 200, Markdown
@@ -206,13 +206,13 @@ For the infrastructure team — not implemented by this PRD:
 
 ## Security Review
 
-- **No authentication on sidecar** — acceptable because it only binds to localhost (K8s pod network / Docker Compose internal network). Not exposed via ingress.
-- **Temp file exposure** — files are written to the container's ephemeral tmpdir and cleaned up in `finally` blocks. The sidecar container runs as a non-root user (add `USER` directive to Dockerfile).
+- **No authentication on Image** — acceptable because it only binds to localhost (K8s pod network / Docker Compose internal network). Not exposed via ingress.
+- **Temp file exposure** — files are written to the container's ephemeral tmpdir and cleaned up in `finally` blocks. The Image container runs as a non-root user (add `USER` directive to Dockerfile).
 - **Subprocess injection** — Pandoc is invoked via `subprocess.run` with an explicit argument list (not shell=True). Filenames are sanitized (alphanumeric, dots, hyphens, underscores only) before use in temp paths.
 - **Path traversal** — filename is sanitized server-side before constructing temp file paths. `os.path.basename()` + regex sanitization prevents directory traversal.
 - **Denial of service** — large files could exhaust memory or disk. Enforce max upload size in FastAPI (configurable, default 50MB). Subprocess timeout kills hung conversions.
 - **Dependency supply chain** — pin major versions in `requirements.txt`. Use `pip install --no-cache-dir` to avoid stale caches. Image built from `python:3.12-slim` (official, maintained).
-- **No secrets** — the sidecar has no access to `.env`, database, or external APIs. It only transforms documents.
+- **No secrets** — the Image has no access to `.env`, database, or external APIs. It only transforms documents.
 
 ## References
 
