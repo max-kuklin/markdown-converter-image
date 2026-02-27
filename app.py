@@ -147,10 +147,6 @@ async def convert_file(request: Request):
 
         async for chunk in request.stream():
             parser.write(chunk)
-            # Check for client disconnect while receiving
-            if await request.is_disconnected():
-                logger.info("[Converter] Client disconnected during upload")
-                return PlainTextResponse(content="", status_code=499)
 
         parser.finalize()
 
