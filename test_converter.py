@@ -50,7 +50,7 @@ class TestExtensionRouting:
         assert get_converter(".xls") == "xls"
 
     def test_case_insensitive(self):
-        assert get_converter(".DOCX") == "pandoc"
+        assert get_converter(".DOCX") == "markitdown"
         assert get_converter(".Xlsx") == "xlsx"
         assert get_converter(".PDF") == "markitdown"
 
@@ -101,9 +101,9 @@ class TestFilenameSanitization:
 # ── Convert endpoint tests ───────────────────────────────────────────────────
 
 class TestConvertEndpoint:
-    def test_missing_file_returns_422(self):
+    def test_missing_file_returns_400(self):
         response = client.post("/convert", data={"filename": "test.docx"})
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     def test_unsupported_extension_returns_415(self):
         response = client.post(

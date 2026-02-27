@@ -38,14 +38,13 @@ _RTF_MAGIC = b'{\\rtf'
 _ZIP_BASED_EXTENSIONS = {".xlsx", ".pptx", ".docx"}
 
 # Extension-to-converter routing table
-PANDOC_EXTENSIONS = {".docx", ".rtf", ".odt", ".txt"}
-MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
+PANDOC_EXTENSIONS = {".rtf", ".odt", ".txt"}
+MARKITDOWN_EXTENSIONS = {".docx", ".pptx", ".xls", ".xlsx", ".pdf"}
 # .doc is handled separately with a fallback chain (see convert())
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 
 DEFAULT_TIMEOUT = 120
-PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "64m")
-PANDOC_INITIAL_HEAP = os.environ.get("PANDOC_INITIAL_HEAP", "32m")
+PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "96m")
 
 
 def antiword_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
@@ -63,9 +62,8 @@ def antiword_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str
 
 def pandoc_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """Convert a document to Markdown using Pandoc CLI."""
-    # -M sets the max heap ceiling (not a reservation); -H sets the initial allocation hint.
     result = subprocess.run(
-        ["pandoc", "+RTS", f"-M{PANDOC_MAX_HEAP}", f"-H{PANDOC_INITIAL_HEAP}", "-RTS",
+        ["pandoc", "+RTS", f"-M{PANDOC_MAX_HEAP}", "-RTS",
          input_path, "-t", "markdown", "--wrap=none"],
         capture_output=True,
         timeout=timeout,

@@ -6,9 +6,9 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 
 | Extension | Converter |
 |-----------|-----------|
-| `.docx`, `.rtf`, `.odt`, `.txt` | Pandoc |
+| `.rtf`, `.odt`, `.txt` | Pandoc |
 | `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain |
-| `.pptx` | MarkItDown |
+| `.docx`, `.pptx` | MarkItDown |
 | `.xls`, `.xlsx` | python-calamine (direct) |
 | `.pdf` | MarkItDown |
 
@@ -60,14 +60,13 @@ uvicorn app:app --port 8100
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `MAX_UPLOAD_SIZE` | `52428800` (50MB) | Maximum upload size in bytes |
+| `MAX_UPLOAD_SIZE` | `10485760` (10MB) | Maximum upload size in bytes |
 | `CONVERSION_TIMEOUT` | `120` | Subprocess timeout in seconds |
-| `MAX_CONCURRENT_CONVERSIONS` | `2` | Maximum parallel conversions |
+| `MAX_CONCURRENT_CONVERSIONS` | `1` | Maximum parallel conversions |
 | `MAX_QUEUED_CONVERSIONS` | `5` | Maximum requests waiting in queue |
-| `PANDOC_MAX_HEAP` | `64m` | Pandoc RTS max heap size (`-M`) |
-| `PANDOC_INITIAL_HEAP` | `32m` | Pandoc RTS initial heap hint (`-H`) |
+| `PANDOC_MAX_HEAP` | `96m` | Pandoc RTS max heap size (`-M`); only applies to `.rtf`/`.odt`/`.txt` |
 
-For default values above, container memory limits should be set to at least 512MB to avoid OOM errors.
+For default values above, container memory limits should be set to at least 256MB to avoid OOM errors.
 
 ## Testing
 
