@@ -63,72 +63,75 @@ async def convert_file(request: Request):
     await _queue_slots.acquire()
     tmp_dir = None
     try:
-        # ── 3. Now parse the multipart body (streams to disk) ──
-        tmp_dir = tempfile.mkdtemp()
-        filename = None
-        tmp_path = None
-        file_size = 0
-
+        # ── 3. Stream multipart body, accumulate file bytes in memory ──
         _, params = parse_options_header(content_type)
         boundary = params.get(b"boundary")
         if not boundary:
             raise HTTPException(status_code=400, detail="Missing multipart boundary")
 
-        # Use streaming multipart parser to write file directly to temp dir
         import python_multipart.multipart as multipart_mod
 
-        header_name = None
-        header_filename = None
         current_field = None
-        file_handle = None
+        cd_filename = None  # filename from Content-Disposition
+        file_data = bytearray()
+        file_size = 0
         form_fields = {}
+        # Buffers for accumulating header field/value across split callbacks
+        _hdr_field = bytearray()
+        _hdr_value = bytearray()
+        _part_headers = {}
+
+        def _flush_header():
+            """Save accumulated header field/value pair."""
+            if _hdr_field:
+                field = bytes(_hdr_field).decode("utf-8", errors="replace").lower()
+                _part_headers[field] = bytes(_hdr_value)
+            _hdr_field.clear()
+            _hdr_value.clear()
 
         def on_part_begin():
-            nonlocal header_name, header_filename, current_field, file_handle
-            header_name = None
-            header_filename = None
+            nonlocal current_field
             current_field = None
-            file_handle = None
+            _hdr_field.clear()
+            _hdr_value.clear()
+            _part_headers.clear()
+
+        def on_header_field(data, start, end):
+            # New field starting means previous field/value pair is complete
+            if _hdr_value:
+                _flush_header()
+            _hdr_field.extend(data[start:end])
+
+        def on_header_value(data, start, end):
+            _hdr_value.extend(data[start:end])
+
+        def on_headers_finished():
+            nonlocal current_field, cd_filename
+            _flush_header()
+            cd = _part_headers.get("content-disposition", b"")
+            if cd:
+                _, vparams = parse_options_header(cd)
+                name = vparams.get(b"name", b"").decode("utf-8", errors="replace")
+                fname = vparams.get(b"filename", b"").decode("utf-8", errors="replace")
+                if name == "file":
+                    current_field = "file"
+                    if fname:
+                        cd_filename = fname
+                elif name:
+                    current_field = name
 
         def on_part_data(data, start, end):
-            nonlocal file_size, file_handle
+            nonlocal file_size
             chunk = data[start:end]
-            if current_field == "file" and file_handle:
+            if current_field == "file":
                 file_size += len(chunk)
                 if file_size > MAX_UPLOAD_SIZE:
                     raise HTTPException(status_code=413, detail="File too large")
-                file_handle.write(chunk)
+                file_data.extend(chunk)
             elif current_field:
                 form_fields[current_field] = form_fields.get(current_field, b"") + chunk
 
         def on_part_end():
-            nonlocal file_handle
-            if file_handle:
-                file_handle.close()
-                file_handle = None
-
-        def on_header_field(data, start, end):
-            pass
-
-        def on_header_value(data, start, end):
-            nonlocal header_name, header_filename, current_field, file_handle, tmp_path
-            value = data[start:end].decode("utf-8", errors="replace")
-            if "name=" in value:
-                _, vparams = parse_options_header(data[start:end])
-                name = vparams.get(b"name", b"").decode("utf-8", errors="replace")
-                fname = vparams.get(b"filename", b"").decode("utf-8", errors="replace")
-                if name == "file" and fname:
-                    current_field = "file"
-                    try:
-                        safe_name = sanitize_filename(fname)
-                    except ValueError:
-                        raise HTTPException(status_code=400, detail="Invalid filename")
-                    tmp_path = os.path.join(tmp_dir, safe_name)
-                    file_handle = open(tmp_path, "wb")
-                elif name:
-                    current_field = name
-
-        def on_headers_complete():
             pass
 
         def on_end():
@@ -140,33 +143,29 @@ async def convert_file(request: Request):
             "on_part_end": on_part_end,
             "on_header_field": on_header_field,
             "on_header_value": on_header_value,
-            "on_headers_complete": on_headers_complete,
+            "on_headers_finished": on_headers_finished,
             "on_end": on_end,
         }
         parser = multipart_mod.MultipartParser(boundary, callbacks)
 
         async for chunk in request.stream():
             parser.write(chunk)
-
         parser.finalize()
 
-        # Get filename from form field if not from Content-Disposition
+        # ── 4. Resolve filename and validate ──
         form_filename = form_fields.get("filename", b"").decode("utf-8", errors="replace")
 
-        if not tmp_path:
-            # No file part found; try using the filename form field
+        if not file_data:
             raise HTTPException(status_code=400, detail="Missing file upload")
 
-        if form_filename:
-            # Prefer explicit filename form field over Content-Disposition
-            try:
-                safe_name = sanitize_filename(form_filename)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid filename")
-        elif tmp_path:
-            safe_name = os.path.basename(tmp_path)
-        else:
+        raw_name = form_filename or cd_filename
+        if not raw_name:
             raise HTTPException(status_code=400, detail="Missing filename")
+
+        try:
+            safe_name = sanitize_filename(raw_name)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid filename")
 
         _, ext = os.path.splitext(safe_name)
         ext = ext.lower()
@@ -179,7 +178,14 @@ async def convert_file(request: Request):
 
         logger.info("[Converter] Converting %s (%s, %d bytes)", safe_name, ext, file_size)
 
-        # ── 4. Wait for a conversion slot ──
+        # ── 5. Write to disk with correct filename for converter ──
+        tmp_dir = tempfile.mkdtemp()
+        tmp_path = os.path.join(tmp_dir, safe_name)
+        with open(tmp_path, "wb") as f:
+            f.write(file_data)
+        del file_data  # free memory before conversion
+
+        # ── 6. Wait for a conversion slot ──
         while True:
             try:
                 await asyncio.wait_for(conversion_semaphore.acquire(), timeout=1.0)

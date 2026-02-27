@@ -4,12 +4,13 @@ A lightweight memory-efficient HTTP API in a Docker Image that converts document
 
 ## Supported Formats
 
-| Extension | Converter |
-|-----------|-----------|
-| `.rtf`, `.odt`, `.txt`, `.docx` | Pandoc |
-| `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain |
-| `.pptx`, `.pdf` | MarkItDown |
-| `.xls`, `.xlsx` | python-calamine (direct) |
+| Extension | Converter | Notes |
+|-----------|-----------|-------|
+| `.rtf`, `.odt`, `.txt` | Pandoc | |
+| `.docx` | Pandoc → MarkItDown | Falls back to MarkItDown on Pandoc heap exhaustion (table-heavy documents) |
+| `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain | |
+| `.pptx`, `.pdf` | MarkItDown | |
+| `.xls`, `.xlsx` | python-calamine (direct) | |
 
 Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early.
 
@@ -31,6 +32,7 @@ Returns `text/markdown` on success.
 | `415` | Unsupported format or password-protected file |
 | `422` | Conversion failed |
 | `429` | Too many conversion requests queued |
+| `499` | Client disconnected before conversion completed |
 | `504` | Conversion timed out |
 
 **`GET /health`** — Health check
@@ -63,9 +65,14 @@ uvicorn app:app --port 8100
 | `CONVERSION_TIMEOUT` | `120` | Subprocess timeout in seconds |
 | `MAX_CONCURRENT_CONVERSIONS` | `1` | Maximum parallel conversions |
 | `MAX_QUEUED_CONVERSIONS` | `5` | Maximum requests waiting in queue |
-| `PANDOC_MAX_HEAP` | `96m` | Pandoc RTS max heap size (`-M`); applies to `.rtf`/`.odt`/`.txt` and `.docx` |
+| `PANDOC_MAX_HEAP` | `128m` | Pandoc RTS max heap size (`-M`); on heap exhaustion `.docx` files fall back to MarkItDown automatically |
 
-For default values above, container memory limits should be set to at least 256MB to avoid OOM errors.
+## Architecture Notes
+
+- **Streaming multipart parsing** — File bytes are accumulated in memory during upload with incremental size checking (`MAX_UPLOAD_SIZE` enforced per-chunk), then written to a temp file with the correct filename just before conversion. This avoids the double-memory overhead of Starlette's built-in `request.form()`.
+- **Subprocess isolation** — MarkItDown and calamine conversions run in child processes so memory is fully returned to the OS after each conversion.
+- **Queue bounding** — Total in-flight requests (active + queued) are capped at `MAX_CONCURRENT_CONVERSIONS + MAX_QUEUED_CONVERSIONS` to prevent memory exhaustion under load. Excess requests receive `429` immediately, before the request body is read.
+- **Client disconnect detection** — While queued or during conversion, the server periodically checks for client disconnects and aborts early (status `499`).
 
 ## Testing
 

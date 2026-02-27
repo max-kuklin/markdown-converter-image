@@ -10,6 +10,7 @@ from converter import (
     MARKITDOWN_EXTENSIONS,
     PANDOC_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
+    convert,
     get_converter,
     antiword_to_markdown,
 )
@@ -477,3 +478,22 @@ class TestDocxConversion:
     def test_docx_routes_to_pandoc(self):
         """.docx should route directly to Pandoc (faster, lower memory than MarkItDown)."""
         assert get_converter(".docx") == "pandoc"
+
+    @patch("converter.markitdown_to_markdown")
+    @patch("converter.pandoc_to_markdown")
+    def test_docx_falls_back_to_markitdown_on_heap_exhaustion(self, mock_pandoc, mock_markitdown):
+        """When Pandoc heap-exhausts on a .docx, should fall back to MarkItDown."""
+        mock_pandoc.side_effect = RuntimeError("Pandoc conversion failed: pandoc: Heap exhausted;")
+        mock_markitdown.return_value = "# Fallback result"
+        result = convert("/fake/test.docx", ".docx")
+        assert result == "# Fallback result"
+        mock_pandoc.assert_called_once()
+        mock_markitdown.assert_called_once()
+
+    @patch("converter.pandoc_to_markdown")
+    def test_docx_non_heap_error_still_raises(self, mock_pandoc):
+        """Non-heap Pandoc errors for .docx should not trigger fallback."""
+        mock_pandoc.side_effect = RuntimeError("Pandoc conversion failed: some other error")
+        import pytest
+        with pytest.raises(RuntimeError, match="some other error"):
+            convert("/fake/test.docx", ".docx")

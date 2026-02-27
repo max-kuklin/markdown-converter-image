@@ -44,7 +44,7 @@ MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 
 DEFAULT_TIMEOUT = 120
-PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "96m")
+PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "128m")
 
 
 def antiword_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
@@ -282,7 +282,13 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
     converter = get_converter(ext)
     if converter == "pandoc":
         logger.info("[Converter] Using Pandoc for %s", extension)
-        return pandoc_to_markdown(input_path, timeout=timeout)
+        try:
+            return pandoc_to_markdown(input_path, timeout=timeout)
+        except RuntimeError as e:
+            if ext == ".docx" and "Heap exhausted" in str(e):
+                logger.warning("[Converter] Pandoc heap exhausted for %s, falling back to MarkItDown", extension)
+                return markitdown_to_markdown(input_path, timeout=timeout)
+            raise
     elif converter == "xlsx":
         logger.info("[Converter] Using calamine for %s", extension)
         return xlsx_to_markdown(input_path, timeout=timeout)
