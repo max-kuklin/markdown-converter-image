@@ -2,6 +2,7 @@ import subprocess
 import logging
 import os
 import re
+import shutil
 import sys
 
 logger = logging.getLogger("converter")
@@ -45,6 +46,19 @@ SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 DEFAULT_TIMEOUT = 120
 PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "64m")
 PANDOC_INITIAL_HEAP = os.environ.get("PANDOC_INITIAL_HEAP", "32m")
+
+
+def antiword_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert a legacy .doc file to plain text using antiword CLI."""
+    result = subprocess.run(
+        ["antiword", input_path],
+        capture_output=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"antiword conversion failed: {stderr}")
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def pandoc_to_markdown(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
@@ -224,7 +238,15 @@ def _convert_doc(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
         logger.info("[Converter] .doc is RTF, using Pandoc")
         return pandoc_to_markdown(input_path, timeout=timeout)
 
-    # OLE2 binary or unknown — try MarkItDown first, then Pandoc as fallback
+    # OLE2 binary or unknown — try antiword first (purpose-built for .doc),
+    # then MarkItDown, then Pandoc as final fallback.
+    if shutil.which("antiword"):
+        logger.info("[Converter] .doc is %s format, trying antiword", fmt)
+        try:
+            return antiword_to_markdown(input_path, timeout=timeout)
+        except RuntimeError as e:
+            logger.warning("[Converter] antiword failed for .doc: %s", e)
+
     logger.info("[Converter] .doc is %s format, trying MarkItDown", fmt)
     try:
         return markitdown_to_markdown(input_path, timeout=timeout)

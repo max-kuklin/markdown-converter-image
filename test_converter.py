@@ -11,6 +11,7 @@ from converter import (
     PANDOC_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
     get_converter,
+    antiword_to_markdown,
 )
 
 client = TestClient(app)
@@ -269,6 +270,27 @@ class TestConverterFunctions:
         result = markitdown_to_markdown("/tmp/data.xlsx")
         assert "| A | B |" in result
 
+    @patch("converter.subprocess.run")
+    def test_antiword_success(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"Hello from a .doc file",
+            stderr=b"",
+        )
+        result = antiword_to_markdown("/tmp/test.doc")
+        assert "Hello from a .doc file" in result
+        args = mock_run.call_args[0][0]
+        assert args[0] == "antiword"
+
+    @patch("converter.subprocess.run")
+    def test_antiword_failure_raises(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stderr=b"I can't open the file",
+        )
+        with pytest.raises(RuntimeError, match="antiword conversion failed"):
+            antiword_to_markdown("/tmp/bad.doc")
+
 
 # ── Password-protected file detection tests ──────────────────────────────────
 
@@ -348,7 +370,7 @@ class TestDocConversion:
     @patch("converter.pandoc_to_markdown")
     @patch("converter.markitdown_to_markdown")
     def test_ole2_doc_tries_markitdown_first(self, mock_markitdown, mock_pandoc):
-        """An OLE2 .doc should try MarkItDown first."""
+        """An OLE2 .doc should try MarkItDown first (when antiword is unavailable)."""
         mock_markitdown.return_value = "# Converted via MarkItDown"
         from converter import _convert_doc
         import tempfile, os
@@ -356,7 +378,8 @@ class TestDocConversion:
         try:
             tmp.write(self.OLE2_HEADER)
             tmp.close()
-            result = _convert_doc(tmp.name)
+            with patch("converter.shutil.which", return_value=None):
+                result = _convert_doc(tmp.name)
             assert "MarkItDown" in result
             mock_markitdown.assert_called_once()
             mock_pandoc.assert_not_called()
@@ -366,7 +389,7 @@ class TestDocConversion:
     @patch("converter.pandoc_to_markdown")
     @patch("converter.markitdown_to_markdown")
     def test_ole2_doc_falls_back_to_pandoc(self, mock_markitdown, mock_pandoc):
-        """When MarkItDown fails for OLE2 .doc, should fall back to Pandoc."""
+        """When MarkItDown fails for OLE2 .doc, should fall back to Pandoc (antiword unavailable)."""
         mock_markitdown.side_effect = RuntimeError("MarkItDown failed")
         mock_pandoc.return_value = "# Converted via Pandoc"
         from converter import _convert_doc
@@ -375,7 +398,8 @@ class TestDocConversion:
         try:
             tmp.write(self.OLE2_HEADER)
             tmp.close()
-            result = _convert_doc(tmp.name)
+            with patch("converter.shutil.which", return_value=None):
+                result = _convert_doc(tmp.name)
             assert "Pandoc" in result
             mock_markitdown.assert_called_once()
             mock_pandoc.assert_called_once()
@@ -385,7 +409,7 @@ class TestDocConversion:
     @patch("converter.pandoc_to_markdown")
     @patch("converter.markitdown_to_markdown")
     def test_ole2_doc_both_fail_gives_clear_error(self, mock_markitdown, mock_pandoc):
-        """When both converters fail for .doc, error should suggest re-saving as .docx."""
+        """When all converters fail for .doc, error should suggest re-saving as .docx."""
         mock_markitdown.side_effect = RuntimeError("MarkItDown failed")
         mock_pandoc.side_effect = RuntimeError("Pandoc failed")
         from converter import _convert_doc
@@ -394,7 +418,51 @@ class TestDocConversion:
         try:
             tmp.write(self.OLE2_HEADER)
             tmp.close()
-            with pytest.raises(RuntimeError, match="re-saving as .docx"):
-                _convert_doc(tmp.name)
+            with patch("converter.shutil.which", return_value=None):
+                with pytest.raises(RuntimeError, match="re-saving as .docx"):
+                    _convert_doc(tmp.name)
+        finally:
+            os.unlink(tmp.name)
+
+    @patch("converter.pandoc_to_markdown")
+    @patch("converter.markitdown_to_markdown")
+    @patch("converter.antiword_to_markdown")
+    def test_ole2_doc_tries_antiword_first(self, mock_antiword, mock_markitdown, mock_pandoc):
+        """When antiword is available, it should be tried first for OLE2 .doc."""
+        mock_antiword.return_value = "Converted via antiword"
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.OLE2_HEADER)
+            tmp.close()
+            with patch("converter.shutil.which", return_value="/usr/bin/antiword"):
+                result = _convert_doc(tmp.name)
+            assert "antiword" in result
+            mock_antiword.assert_called_once()
+            mock_markitdown.assert_not_called()
+            mock_pandoc.assert_not_called()
+        finally:
+            os.unlink(tmp.name)
+
+    @patch("converter.pandoc_to_markdown")
+    @patch("converter.markitdown_to_markdown")
+    @patch("converter.antiword_to_markdown")
+    def test_ole2_doc_antiword_fails_falls_to_markitdown(self, mock_antiword, mock_markitdown, mock_pandoc):
+        """When antiword fails, should fall back to MarkItDown."""
+        mock_antiword.side_effect = RuntimeError("antiword failed")
+        mock_markitdown.return_value = "# Converted via MarkItDown"
+        from converter import _convert_doc
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".doc", delete=False)
+        try:
+            tmp.write(self.OLE2_HEADER)
+            tmp.close()
+            with patch("converter.shutil.which", return_value="/usr/bin/antiword"):
+                result = _convert_doc(tmp.name)
+            assert "MarkItDown" in result
+            mock_antiword.assert_called_once()
+            mock_markitdown.assert_called_once()
+            mock_pandoc.assert_not_called()
         finally:
             os.unlink(tmp.name)

@@ -14,7 +14,7 @@ FROM python:3.12-slim
 
 ARG PANDOC_VERSION=3.6.4
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl libxml2 libxslt1.1 && \
+    apt-get install -y --no-install-recommends curl antiword libxml2 libxslt1.1 && \
     curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz" \
     | tar xz --strip-components=2 -C /usr/local/bin pandoc-${PANDOC_VERSION}/bin/pandoc && \
     apt-get purge -y --auto-remove curl && \

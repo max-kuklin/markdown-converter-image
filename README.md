@@ -7,7 +7,7 @@ A lightweight HTTP sidecar that converts documents to Markdown using [Pandoc](ht
 | Extension | Converter |
 |-----------|-----------|
 | `.docx`, `.rtf`, `.odt`, `.txt` | Pandoc |
-| `.doc` | Pandoc or MarkItDown (auto-detected; RTF → Pandoc, OLE2 binary → MarkItDown with Pandoc fallback) |
+| `.doc` | Auto-detected: RTF → Pandoc, OLE2 binary → antiword → MarkItDown → Pandoc fallback chain |
 | `.pptx` | MarkItDown |
 | `.xls` | MarkItDown |
 | `.xlsx` | openpyxl (direct) |
@@ -79,4 +79,4 @@ python -m pytest test_converter.py -v
 
 ## Tech Stack
 
-Python 3.12 · FastAPI · Pandoc · MarkItDown
+Python 3.12 · FastAPI · Pandoc · MarkItDown · antiword
