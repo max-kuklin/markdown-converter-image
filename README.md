@@ -7,13 +7,13 @@ A lightweight memory-efficient HTTP API in a Docker Image that converts document
 | Extension | Converter |
 |-----------|-----------|
 | `.rtf`, `.odt`, `.txt` | Pandoc |
-| `.docx` | Pandoc → MarkItDown fallback |
+| `.docx` | Pandoc → MarkItDown → plain-text extraction (each on memory/time failure); Pandoc and MarkItDown read a copy stripped of layout-only markup |
 | `.doc` | Auto-detected: RTF → Pandoc, OLE2 → antiword → MarkItDown → Pandoc |
 | `.pptx`, `.pdf` | MarkItDown |
 | `.xls` | python-calamine |
-| `.xlsx` | python-calamine → stdlib XML fallback |
+| `.xlsx` | python-calamine → streaming stdlib XML fallback (also used when calamine exceeds the memory limit; output capped at 20 MB) |
 
-Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early.
+Password-protected Office files (`.docx`, `.xlsx`, `.pptx`) are detected and rejected early; password-protected `.xls` files are rejected with the same `415` once calamine reports them.
 
 ## API
 
@@ -67,7 +67,7 @@ uvicorn app:app --port 8100
 | `CONVERSION_TIMEOUT` | `120` | Per-request conversion timeout in seconds. For `.docx`, Pandoc gets the first half; on failure, MarkItDown gets the remainder. |
 | `MAX_CONCURRENT_CONVERSIONS` | `1` | Maximum parallel conversions |
 | `MAX_QUEUED_CONVERSIONS` | `5` | Maximum requests waiting in queue |
-| `PANDOC_MAX_HEAP` | `128m` | Pandoc RTS max heap size (`-M`); on heap exhaustion `.docx` files fall back to MarkItDown automatically |
+| `PANDOC_MAX_HEAP` | `230m` | Pandoc RTS max heap size (`-M`); Pandoc's RSS runs ~100 MB above this, so keep it about that far below `SUBPROCESS_MEMORY_LIMIT_MB`. On heap exhaustion `.docx` files fall back automatically |
 | `SUBPROCESS_MEMORY_LIMIT_MB` | `350` | RSS limit per conversion subprocess (MB). The parent polls `/proc` and kills the process group if RSS exceeds this. Set to `0` to disable. Only enforced on Linux. |
 
 **Container memory sizing:**

@@ -1,5 +1,6 @@
 import os
 import subprocess
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +11,10 @@ from converter import (
     MARKITDOWN_EXTENSIONS,
     PANDOC_EXTENSIONS,
     SUPPORTED_EXTENSIONS,
+    MemoryLimitExceeded,
+    _docx_to_markdown_text,
+    _slim_docx,
+    _xlsx_to_markdown_xml,
     convert,
     get_converter,
     antiword_to_markdown,
@@ -518,3 +523,121 @@ class TestDocxConversion:
         mock_markitdown.assert_called_once()
         # MarkItDown gets the remaining time (roughly half since Pandoc used its half)
         assert 10 <= mock_markitdown.call_args.kwargs["timeout"] <= 120
+
+    @patch("converter._docx_to_markdown_text")
+    @patch("converter.markitdown_to_markdown")
+    @patch("converter.pandoc_to_markdown")
+    def test_docx_falls_back_to_text_when_markitdown_oom(self, mock_pandoc, mock_markitdown, mock_text):
+        mock_pandoc.side_effect = MemoryLimitExceeded("pandoc: out of memory")
+        mock_markitdown.side_effect = MemoryLimitExceeded("markitdown: out of memory")
+        mock_text.return_value = "plain text"
+        assert convert("/fake/test.docx", ".docx", timeout=120) == "plain text"
+        # Text extraction reads the original file, not the slimmed copy
+        assert mock_text.call_args.args[0] == "/fake/test.docx"
+
+    def test_slim_docx_keeps_text_and_symbol_fonts(self, tmp_path):
+        body = (
+            '<w:p w:rsidR="00AB12"><w:r><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="20"/>'
+            '<w:color w:val="FF0000"/></w:rPr><w:t>Hello</w:t></w:r>'
+            '<w:r><w:rPr><w:rFonts w:ascii="Wingdings"/></w:rPr><w:sym w:font="Wingdings" w:char="F06F"/></w:r></w:p>'
+        )
+        src = tmp_path / "doc.docx"
+        _write_docx(src, body)
+        slim = _slim_docx(str(src), timeout=30)
+        assert slim is not None
+        with zipfile.ZipFile(slim) as z:
+            xml = z.read("word/document.xml").decode()
+        assert "<w:t>Hello</w:t>" in xml
+        assert "Wingdings" in xml
+        assert "Arial" not in xml and "w:sz" not in xml and "w:color" not in xml and "rsid" not in xml
+
+    def test_slim_docx_returns_none_for_bad_file(self, tmp_path):
+        bad = tmp_path / "bad.docx"
+        bad.write_bytes(b"not a zip")
+        assert _slim_docx(str(bad), timeout=30) is None
+        assert not (tmp_path / "bad.slim.docx").exists()
+
+    def test_docx_text_fallback_extracts_headings_paragraphs_tables(self, tmp_path):
+        body = (
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>Intro</w:t></w:r></w:p>'
+            '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>'
+            '<w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+        )
+        src = tmp_path / "doc.docx"
+        _write_docx(src, body)
+        result = _docx_to_markdown_text(str(src))
+        assert "# Title" in result
+        assert "Intro" in result
+        assert "| A | B |" in result
+
+
+def _write_docx(path, body_xml):
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("word/document.xml", f'<?xml version="1.0"?><w:document {ns}><w:body>{body_xml}</w:body></w:document>')
+
+
+def _write_xlsx(path, rows_xml, shared=()):
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    rns = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("xl/workbook.xml", f'<workbook {ns} {rns}><sheets><sheet name="S1" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            'Target="worksheets/sheet1.xml"/></Relationships>',
+        )
+        z.writestr("xl/sharedStrings.xml", f'<sst {ns}>' + "".join(f"<si><t>{s}</t></si>" for s in shared) + "</sst>")
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}><sheetData>{rows_xml}</sheetData></worksheet>")
+
+
+class TestXlsxFallback:
+    @patch("converter._xlsx_to_markdown_xml")
+    @patch("converter._run_with_memory_limit")
+    def test_calamine_oom_uses_xml_fallback(self, mock_rwml, mock_xml):
+        mock_rwml.side_effect = MemoryLimitExceeded("xlsx_to_markdown: out of memory")
+        mock_xml.return_value = "## S1"
+        assert convert("/fake/book.xlsx", ".xlsx") == "## S1"
+        mock_xml.assert_called_once()
+
+    def test_xml_fallback_places_cells_and_trims_sparse_rows(self, tmp_path):
+        rows = (
+            '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>'
+            '<row r="2"><c r="A2" s="3"/></row>'
+            '<row r="3"><c r="B3"><v>42</v></c><c r="XFD3" s="1"/></row>'
+        )
+        src = tmp_path / "book.xlsx"
+        _write_xlsx(src, rows, shared=("Name", "Score"))
+        result = _xlsx_to_markdown_xml(str(src))
+        assert result.splitlines() == [
+            "## S1",
+            "| Name |  | Score |",
+            "| --- | --- | --- |",
+            "|  | 42 |",
+            "",
+        ]
+
+    def test_xml_fallback_rejects_oversized_output(self, tmp_path):
+        src = tmp_path / "book.xlsx"
+        _write_xlsx(src, '<row r="1"><c r="A1"><v>1</v></c></row>')
+        with patch("converter.XLSX_FALLBACK_MAX_OUTPUT_MB", 0):
+            with pytest.raises(MemoryLimitExceeded, match="output exceeded"):
+                _xlsx_to_markdown_xml(str(src))
+
+
+class TestXlsPassword:
+    @patch("converter._run_with_memory_limit")
+    def test_encrypted_xls_returns_415(self, mock_rwml):
+        mock_rwml.return_value = subprocess.CompletedProcess(
+            [], returncode=1, stdout=b"",
+            stderr=b"Traceback...\npython_calamine.PasswordError: Workbook is password protected",
+        )
+        response = client.post(
+            "/convert",
+            files={"file": ("locked.xls", b"x", "application/octet-stream")},
+            data={"filename": "locked.xls"},
+        )
+        assert response.status_code == 415
+        assert "password-protected" in response.json()["detail"].lower()

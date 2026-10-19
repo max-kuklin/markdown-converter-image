@@ -47,7 +47,12 @@ MARKITDOWN_EXTENSIONS = {".pptx", ".xls", ".xlsx", ".pdf"}
 SUPPORTED_EXTENSIONS = PANDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS | {".doc"}
 
 DEFAULT_TIMEOUT = 120
-PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "128m")
+# Pandoc's RSS runs ~100 MB above its heap cap, so 230m stays under the 350 MB watchdog.
+PANDOC_MAX_HEAP = os.environ.get("PANDOC_MAX_HEAP", "230m")
+
+# Caps the streaming .xlsx fallback so sparse raw-data sheets can't flood the parent process.
+XLSX_FALLBACK_MAX_OUTPUT_MB = 20
+_OUTPUT_LIMIT_EXIT_CODE = 3
 
 # RSS limit for converter subprocesses in MB.  The parent polls the child's
 # RSS and kills it (SIGKILL) if it exceeds this threshold.
@@ -327,6 +332,8 @@ sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
     )
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        if "PasswordError" in stderr:
+            raise ValueError("File appears to be password-protected (encrypted Office document)")
         clean_msg = _extract_exception_message(stderr)
         logger.error("[Converter] xls_to_markdown stderr: %s", stderr)
         raise RuntimeError(f"XLS conversion failed: {clean_msg}")
@@ -334,31 +341,59 @@ sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
 
 
 def _xlsx_to_markdown_xml(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
-    """Fallback: convert .xlsx to Markdown using stdlib zipfile + xml.etree.
+    """Fallback: stream .xlsx to Markdown using stdlib zipfile + xml.etree.iterparse.
 
-    Used when calamine cannot parse the file (e.g. unusual sheet types).
+    Used when calamine cannot parse the file or runs out of memory (calamine
+    allocates the full used range, which a single stray cell in column XFD
+    turns into millions of cells).  Rows are streamed, trailing empty cells
+    trimmed and empty rows skipped, so memory stays flat.
     """
     script = r'''
-import sys, zipfile, xml.etree.ElementTree as ET
+import re, sys, zipfile, xml.etree.ElementTree as ET
 
-NS = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 WS_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
 R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+COL_RE = re.compile(r"[A-Z]+")
 
-path = sys.argv[1]
+path, max_bytes, limit_exit_code = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+written = 0
+
+
+def emit(line):
+    global written
+    data = (line + "\n").encode("utf-8")
+    written += len(data)
+    if written > max_bytes:
+        sys.exit(limit_exit_code)
+    sys.stdout.buffer.write(data)
+
+
+def col_index(ref):
+    n = 0
+    for ch in COL_RE.match(ref)[0]:
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def text_of(el):
+    return "".join(t.text or "" for t in el.iter(NS + "t"))
+
+
 with zipfile.ZipFile(path) as z:
+    names = set(z.namelist())
     shared = []
-    if "xl/sharedStrings.xml" in z.namelist():
-        tree = ET.parse(z.open("xl/sharedStrings.xml"))
-        for si in tree.findall(".//s:si", NS):
-            texts = si.findall(".//s:t", NS)
-            shared.append("".join(t.text or "" for t in texts))
+    if "xl/sharedStrings.xml" in names:
+        with z.open("xl/sharedStrings.xml") as fh:
+            for _, el in ET.iterparse(fh):
+                if el.tag == NS + "si":
+                    shared.append(text_of(el))
+                    el.clear()
 
-    wb = ET.parse(z.open("xl/workbook.xml"))
     rels = ET.parse(z.open("xl/_rels/workbook.xml.rels"))
     rid_map = {}
-    for rel in rels.findall(f".//{{{REL_NS}}}Relationship"):
+    for rel in rels.iter(REL_NS + "Relationship"):
         if WS_TYPE in rel.get("Type", ""):
             t = rel.get("Target")
             if t.startswith("/"):
@@ -367,45 +402,59 @@ with zipfile.ZipFile(path) as z:
                 t = "xl/" + t
             rid_map[rel.get("Id")] = t
 
-    parts = []
-    for sheet_el in wb.findall(".//s:sheet", NS):
-        name = sheet_el.get("name")
-        rid = sheet_el.get(R_ID)
-        sp = rid_map.get(rid)
-        if not sp or sp not in z.namelist():
+    wb = ET.parse(z.open("xl/workbook.xml"))
+    for sheet_el in wb.iter(NS + "sheet"):
+        sp = rid_map.get(sheet_el.get(R_ID))
+        if not sp or sp not in names:
             continue
-        tree = ET.parse(z.open(sp))
-        rows = tree.findall(".//s:sheetData/s:row", NS)
-        if not rows:
-            continue
-        parts.append(f"## {name}")
-        for ri, row_el in enumerate(rows):
-            cells = []
-            for cell in row_el.findall("s:c", NS):
-                val = ""
-                v_el = cell.find("s:v", NS)
-                if v_el is not None and v_el.text:
-                    if cell.get("t") == "s":
-                        idx = int(v_el.text)
-                        val = shared[idx] if idx < len(shared) else ""
-                    else:
-                        val = v_el.text
-                is_el = cell.find("s:is", NS)
-                if is_el is not None:
-                    texts = is_el.findall(".//s:t", NS)
-                    val = "".join(t.text or "" for t in texts)
-                cells.append(val)
-            parts.append("| " + " | ".join(cells) + " |")
-            if ri == 0:
-                parts.append("| " + " | ".join("---" for _ in cells) + " |")
-        parts.append("")
-    sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
+        header_done = False
+        with z.open(sp) as fh:
+            for _, el in ET.iterparse(fh):
+                if el.tag != NS + "row":
+                    continue
+                cells = []
+                for cell in el.iter(NS + "c"):
+                    ref = cell.get("r")
+                    if ref:
+                        idx = col_index(ref)
+                        if idx > len(cells):
+                            cells.extend([""] * (idx - len(cells)))
+                    val = ""
+                    v_el = cell.find(NS + "v")
+                    if v_el is not None and v_el.text:
+                        if cell.get("t") == "s":
+                            i = int(v_el.text)
+                            val = shared[i] if i < len(shared) else ""
+                        else:
+                            val = v_el.text
+                    is_el = cell.find(NS + "is")
+                    if is_el is not None:
+                        val = text_of(is_el)
+                    cells.append(val)
+                el.clear()
+                while cells and not cells[-1].strip():
+                    cells.pop()
+                if not cells:
+                    continue
+                if not header_done:
+                    emit(f"## {sheet_el.get('name')}")
+                emit("| " + " | ".join(cells) + " |")
+                if not header_done:
+                    emit("| " + " | ".join("---" for _ in cells) + " |")
+                    header_done = True
+        if header_done:
+            emit("")
 '''
     result = _run_with_memory_limit(
-        [sys.executable, "-c", script, input_path],
+        [sys.executable, "-c", script, input_path,
+         str(XLSX_FALLBACK_MAX_OUTPUT_MB * 1024 * 1024), str(_OUTPUT_LIMIT_EXIT_CODE)],
         timeout=timeout,
         converter_name="xlsx_xml_fallback",
     )
+    if result.returncode == _OUTPUT_LIMIT_EXIT_CODE:
+        raise MemoryLimitExceeded(
+            f"xlsx_xml_fallback: converted output exceeded {XLSX_FALLBACK_MAX_OUTPUT_MB} MB limit"
+        )
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         clean_msg = _extract_exception_message(stderr)
@@ -441,11 +490,15 @@ for name in wb.sheet_names:
     parts.append("")
 sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
 '''
-    result = _run_with_memory_limit(
-        [sys.executable, "-c", script, input_path],
-        timeout=timeout,
-        converter_name="xlsx_to_markdown",
-    )
+    try:
+        result = _run_with_memory_limit(
+            [sys.executable, "-c", script, input_path],
+            timeout=timeout,
+            converter_name="xlsx_to_markdown",
+        )
+    except MemoryLimitExceeded as e:
+        logger.warning("[Converter] calamine out of memory for .xlsx, trying XML fallback: %s", e)
+        return _xlsx_to_markdown_xml(input_path, timeout=timeout)
     if result.returncode == 0:
         return result.stdout.decode("utf-8", errors="replace")
 
@@ -453,6 +506,176 @@ sys.stdout.buffer.write("\n".join(parts).encode("utf-8"))
     logger.warning("[Converter] calamine failed for .xlsx, trying XML fallback: %s",
                    _extract_exception_message(stderr))
     return _xlsx_to_markdown_xml(input_path, timeout=timeout)
+
+
+# Strips layout-only markup from word/document.xml.  Pandoc's docx reader holds
+# the whole XML tree in memory, and survey questionnaires carry run-level font,
+# size, colour, language and rsid noise on every run; dropping it roughly halves
+# Pandoc's memory with byte-identical Markdown on the samples tested.
+_DOCX_SLIM_SCRIPT = r'''
+import re, sys, zipfile
+
+NOISE = re.compile(
+    rb"<w:(?:sz|szCs|color|lang|bCs|iCs|kern|proofErr|noProof|lastRenderedPageBreak|shd|"
+    rb"position|snapToGrid|webHidden|spacing|w|cs|vAlign|top|left|bottom|right|start|end|"
+    rb"insideH|insideV|keepNext|keepLines|widowControl|autoSpaceDE|autoSpaceDN|"
+    rb"adjustRightInd|textAlignment|contextualSpacing|suppressAutoHyphens|tblLayout|tblInd|"
+    rb"emboss|imprint|outline|shadow|effect|fitText|eastAsianLayout)\b[^>]*/>"
+)
+RSID = re.compile(rb' (?:w:rsid\w*|w14:paraId|w14:textId)="[^"]*"')
+RFONTS = re.compile(rb"<w:rFonts\b[^>]*/>")
+# Pandoc maps Symbol/Wingdings code points to Unicode, so those font hints stay.
+SYMBOL_FONT = re.compile(rb"Symbol|Wingdings|Webdings", re.I)
+EMPTY_RPR = re.compile(rb"<w:rPr>\s*</w:rPr>")
+
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as zi, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zo:
+    for info in zi.infolist():
+        data = zi.read(info.filename)
+        if info.filename == "word/document.xml":
+            data = RSID.sub(b"", data)
+            data = NOISE.sub(b"", data)
+            data = RFONTS.sub(lambda m: m[0] if SYMBOL_FONT.search(m[0]) else b"", data)
+            data = EMPTY_RPR.sub(b"", data)
+        zo.writestr(info, data)
+'''
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _slim_docx(input_path: str, timeout: int) -> str | None:
+    """Write a copy of *input_path* without layout-only markup; return its path, or None on failure."""
+    slim_path = os.path.splitext(input_path)[0] + ".slim.docx"
+    try:
+        result = _run_with_memory_limit(
+            [sys.executable, "-c", _DOCX_SLIM_SCRIPT, input_path, slim_path],
+            timeout=timeout,
+            converter_name="docx_slim",
+        )
+        if result.returncode == 0:
+            return slim_path
+        logger.warning("[Converter] docx slimming failed: %s",
+                       _extract_exception_message(result.stderr.decode("utf-8", errors="replace")))
+    except (MemoryLimitExceeded, subprocess.TimeoutExpired) as e:
+        logger.warning("[Converter] docx slimming failed: %s", e)
+    _remove_quietly(slim_path)
+    return None
+
+
+def _docx_to_markdown_text(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Last-resort .docx fallback: stream paragraphs, headings and table rows as text.
+
+    Loses inline formatting, list numbering and merged-cell layout, but runs in
+    near-constant memory for documents Pandoc and MarkItDown cannot fit.
+    """
+    script = r'''
+import re, sys, zipfile, xml.etree.ElementTree as ET
+
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+HEADING = re.compile(r"^[Hh]eading\s?(\d)$")
+out = sys.stdout.buffer
+
+
+def para_text(p):
+    parts = []
+    for el in p.iter():
+        if el.tag == W + "t":
+            parts.append(el.text or "")
+        elif el.tag == W + "tab":
+            parts.append("\t")
+        elif el.tag in (W + "br", W + "cr"):
+            parts.append(" ")
+    return "".join(parts).strip()
+
+
+def heading_level(p):
+    style = p.find(f"{W}pPr/{W}pStyle")
+    m = HEADING.match(style.get(W + "val", "")) if style is not None else None
+    return int(m[1]) if m else 0
+
+
+with zipfile.ZipFile(sys.argv[1]) as z, z.open("word/document.xml") as fh:
+    depth = 0
+    row = None
+    for ev, el in ET.iterparse(fh, events=("start", "end")):
+        tag = el.tag
+        if ev == "start":
+            if tag == W + "tbl":
+                depth += 1
+                if depth == 1:
+                    out.write(b"\n")
+            elif tag == W + "tr" and depth == 1:
+                row = []
+            continue
+        if tag == W + "tc" and depth == 1:
+            row.append(" ".join(t for t in (para_text(p) for p in el.iter(W + "p")) if t))
+            el.clear()
+        elif tag == W + "tr" and depth == 1:
+            if any(row):
+                out.write(("| " + " | ".join(row) + " |\n").encode("utf-8"))
+            row = None
+            el.clear()
+        elif tag == W + "tbl":
+            depth -= 1
+            if depth == 0:
+                out.write(b"\n")
+                el.clear()
+        elif tag == W + "p" and depth == 0:
+            text = para_text(el)
+            if text:
+                level = heading_level(el)
+                out.write((("#" * level + " " if level else "") + text + "\n\n").encode("utf-8"))
+            el.clear()
+'''
+    result = _run_with_memory_limit(
+        [sys.executable, "-c", script, input_path],
+        timeout=timeout,
+        converter_name="docx_text_fallback",
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        logger.error("[Converter] docx text fallback stderr: %s", stderr)
+        raise RuntimeError(f"DOCX conversion failed: {_extract_exception_message(stderr)}")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _convert_docx(input_path: str, timeout: int = DEFAULT_TIMEOUT) -> str:
+    """Convert .docx: Pandoc -> MarkItDown -> plain-text extraction, each on memory/time failure.
+
+    Pandoc and MarkItDown read a slimmed copy (see _DOCX_SLIM_SCRIPT).  Pandoc
+    gets half the budget so the fallbacks still have time.
+    """
+    start = time.monotonic()
+
+    def remaining() -> int:
+        return timeout - int(time.monotonic() - start)
+
+    slim_path = _slim_docx(input_path, timeout=timeout // 4)
+    source = slim_path or input_path
+    try:
+        try:
+            return pandoc_to_markdown(source, timeout=timeout // 2)
+        except (MemoryLimitExceeded, subprocess.TimeoutExpired, RuntimeError) as e:
+            if isinstance(e, RuntimeError) and "Heap exhausted" not in str(e):
+                raise
+            if remaining() < 10:
+                raise
+            logger.warning("[Converter] Pandoc failed for .docx (%s), falling back to MarkItDown", e)
+        try:
+            return markitdown_to_markdown(source, timeout=remaining())
+        except (MemoryLimitExceeded, subprocess.TimeoutExpired, RuntimeError) as e:
+            if remaining() < 10:
+                raise
+            logger.warning("[Converter] MarkItDown failed for .docx (%s), falling back to text extraction", e)
+        return _docx_to_markdown_text(input_path, timeout=remaining())
+    finally:
+        if slim_path:
+            _remove_quietly(slim_path)
 
 
 def get_converter(extension: str) -> str | None:
@@ -554,40 +777,14 @@ def convert(input_path: str, extension: str, timeout: int = DEFAULT_TIMEOUT) -> 
 
     if ext == ".doc":
         return _convert_doc(input_path, timeout=timeout)
+    if ext == ".docx":
+        logger.info("[Converter] Using Pandoc for %s", extension)
+        return _convert_docx(input_path, timeout=timeout)
 
     converter = get_converter(ext)
     if converter == "pandoc":
         logger.info("[Converter] Using Pandoc for %s", extension)
-        # For .docx, cap Pandoc at half the budget so the MarkItDown
-        # fallback still has time within the overall CONVERSION_TIMEOUT.
-        pandoc_timeout = timeout // 2 if ext == ".docx" else timeout
-        start = time.monotonic()
-        try:
-            return pandoc_to_markdown(input_path, timeout=pandoc_timeout)
-        except MemoryLimitExceeded:
-            if ext == ".docx":
-                remaining = timeout - int(time.monotonic() - start)
-                if remaining < 10:
-                    raise
-                logger.warning("[Converter] Pandoc OOM for %s, falling back to MarkItDown", extension)
-                return markitdown_to_markdown(input_path, timeout=remaining)
-            raise
-        except RuntimeError as e:
-            if ext == ".docx" and "Heap exhausted" in str(e):
-                remaining = timeout - int(time.monotonic() - start)
-                if remaining < 10:
-                    raise
-                logger.warning("[Converter] Pandoc heap exhausted for %s, falling back to MarkItDown", extension)
-                return markitdown_to_markdown(input_path, timeout=remaining)
-            raise
-        except subprocess.TimeoutExpired:
-            if ext == ".docx":
-                remaining = timeout - int(time.monotonic() - start)
-                if remaining < 10:
-                    raise
-                logger.warning("[Converter] Pandoc timed out for %s, falling back to MarkItDown", extension)
-                return markitdown_to_markdown(input_path, timeout=remaining)
-            raise
+        return pandoc_to_markdown(input_path, timeout=timeout)
     elif converter == "xlsx":
         logger.info("[Converter] Using calamine for %s", extension)
         return xlsx_to_markdown(input_path, timeout=timeout)
